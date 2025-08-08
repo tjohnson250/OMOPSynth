@@ -18,3 +18,5 @@ Imports:
     lifecycle
 Language: en-US
 VignetteBuilder: knitr
+URL: https://github.com/tjohnson250/OMOPSynth
+BugReports: https://github.com/tjohnson250/OMOPSynth/issues
