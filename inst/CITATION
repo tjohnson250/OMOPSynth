@@ -1,0 +1,17 @@
+# inst/CITATION
+citHeader("To cite OMOPSynth in publications use:")
+
+bibentry(
+  bibtype  = "Manual",
+  title    = "OMOPSynth: Synthetic OMOP Common Data Model Database Setup",
+  author   = "Todd R. Johnson",
+  year     = "2024",
+  note     = "R package version 0.1.0",
+  url      = "https://github.com/tjohnson250/OMOPSynth",
+  textVersion = paste(
+    "Todd R. Johnson (2024).",
+    "OMOPSynth: Synthetic OMOP Common Data Model Database Setup.",
+    "R package version 0.1.0.",
+    "https://github.com/tjohnson250/OMOPSynth"
+  )
+)

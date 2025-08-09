@@ -1,0 +1,96 @@
+# vignettes/articles/performance-tips.Rmd
+---
+title: "Performance Tips for Large Datasets"
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+# Performance Optimization for OMOPSynth
+
+This article covers performance optimization techniques when working with large OMOP CDM datasets using OMOPSynth.
+
+## Memory Management
+
+### Efficient Data Processing
+
+```{r eval=FALSE}
+# Process data in chunks for large datasets
+process_in_chunks <- function(cdm, chunk_size = 10000) {
+  total_rows <- cdm$person %>% tally() %>% pull(n)
+  
+  results <- list()
+  for (i in seq(1, total_rows, chunk_size)) {
+    chunk <- cdm$person %>%
+      slice(i:(i + chunk_size - 1)) %>%
+      collect()
+    
+    # Process chunk
+    processed <- chunk %>%
+      mutate(age = 2024 - year_of_birth) %>%
+      filter(age >= 18)
+    
+    results[[length(results) + 1]] <- processed
+    rm(chunk, processed)
+    gc()  # Force garbage collection
+  }
+  
+  return(bind_rows(results))
+}
+```
+
+### Database Optimization
+
+```{r eval=FALSE}
+# Optimize DuckDB settings
+optimize_duckdb <- function() {
+  con <- DBI::dbConnect(
+    duckdb::duckdb(),
+    config = list(
+      memory_limit = "8GB",
+      threads = parallel::detectCores(),
+      max_memory = "80%"
+    )
+  )
+  return(con)
+}
+```
+
+## Query Optimization
+
+### Use Appropriate Filtering
+
+```{r eval=FALSE}
+# Good: Filter before collecting
+cdm$condition_occurrence %>%
+  filter(condition_concept_id == 201826) %>%
+  select(person_id, condition_start_date) %>%
+  collect()
+
+# Avoid: Collecting everything then filtering
+cdm$condition_occurrence %>%
+  collect() %>%
+  filter(condition_concept_id == 201826)
+```
+
+### Create Indexes for Frequent Queries
+
+```{r eval=FALSE}
+create_performance_indexes <- function(con) {
+  indexes <- c(
+    "CREATE INDEX IF NOT EXISTS idx_person_gender ON person(gender_concept_id)",
+    "CREATE INDEX IF NOT EXISTS idx_condition_person ON condition_occurrence(person_id)",
+    "CREATE INDEX IF NOT EXISTS idx_condition_concept ON condition_occurrence(condition_concept_id)"
+  )
+  
+  for (idx in indexes) {
+    DBI::dbExecute(con, idx)
+  }
+}
+```
+
+This covers the essential performance optimization techniques for working with large OMOP CDM datasets.

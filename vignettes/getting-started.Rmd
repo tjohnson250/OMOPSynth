@@ -1,8 +1,13 @@
+
 ---
-title: "getting-started"
+
+# vignettes/getting-started.Rmd
+
+---
+title: "Getting Started with OMOPSynth"
 output: rmarkdown::html_vignette
 vignette: >
-  %\VignetteIndexEntry{getting-started}
+  %\VignetteIndexEntry{Getting Started with OMOPSynth}
   %\VignetteEngine{knitr::rmarkdown}
   %\VignetteEncoding{UTF-8}
 ---
@@ -10,10 +15,275 @@ vignette: >
 ```{r, include = FALSE}
 knitr::opts_chunk$set(
   collapse = TRUE,
-  comment = "#>"
+  comment = "#>",
+  fig.width = 7,
+  fig.height = 5
 )
 ```
 
-```{r setup}
+## Introduction
+
+OMOPSynth makes it easy to set up in-memory OMOP Common Data Model (CDM) databases with synthetic data. This vignette will walk you through the basic functionality and common use cases.
+
+## Installation and Setup
+
+First, install and load the package:
+
+```{r setup, eval=FALSE}
+# Install from GitHub
+devtools::install_github("yourusername/OMOPSynth")
+
+# Load the package
 library(OMOPSynth)
 ```
+
+```{r load, echo=FALSE, message=FALSE}
+# For vignette building
+library(OMOPSynth)
+```
+
+Check that all required packages are installed:
+
+```{r check-packages, eval=FALSE}
+check_and_install_packages()
+```
+
+## Quick Demo
+
+The fastest way to see OMOPSynth in action is to run the demo:
+
+```{r demo, eval=FALSE}
+demo_omop_cdm_setup()
+```
+
+This will:
+1. Set up an OMOP CDM with Eunomia data
+2. Generate summary statistics
+3. Create demographic visualizations
+4. Set up custom synthetic data
+5. Compare the approaches
+
+## Setting Up OMOP CDM with Eunomia Data
+
+### Basic Setup
+
+The simplest way to get started is with the default Eunomia dataset:
+
+```{r eunomia-basic, eval=FALSE}
+# Setup with default GiBleed dataset
+cdm_setup <- setup_omop_cdm_eunomia()
+
+# Examine the CDM structure
+print(cdm_setup$cdm)
+```
+
+### Available Datasets
+
+See what datasets are available:
+
+```{r datasets}
+datasets <- get_available_datasets()
+head(datasets, 10)
+```
+
+### Setup with Specific Dataset
+
+```{r eunomia-specific, eval=FALSE}
+# Setup with COVID-19 dataset
+covid_setup <- setup_omop_cdm_eunomia("synthea-covid19-10k")
+
+# Setup with heart disease dataset  
+heart_setup <- setup_omop_cdm_eunomia("synthea-heart-10k")
+```
+
+## Exploring CDM Data
+
+### Basic Statistics
+
+Use `explore_cdm()` to get an overview of your data:
+
+```{r explore, eval=FALSE}
+# Get comprehensive statistics
+stats <- explore_cdm(cdm_setup$cdm)
+
+# Access specific statistics
+print(paste("Total patients:", stats$total_persons))
+print(paste("Total visits:", stats$total_visits))
+```
+
+### Demographic Visualizations
+
+Create demographic plots:
+
+```{r demographics, eval=FALSE}
+# Create age and gender distribution plot
+demo_plot <- plot_cdm_demographics(cdm_setup$cdm)
+print(demo_plot)
+
+# Customize the plot
+custom_plot <- plot_cdm_demographics(cdm_setup$cdm, bins = 20, alpha = 0.5)
+```
+
+## Working with CDM Data
+
+### Basic Queries
+
+Once you have a CDM reference, you can query it using dplyr syntax:
+
+```{r queries, eval=FALSE}
+library(dplyr)
+
+# Count patients by gender
+gender_counts <- cdm_setup$cdm$person %>%
+  group_by(gender_concept_id) %>%
+  summarise(count = n()) %>%
+  collect()
+
+print(gender_counts)
+
+# Find patients with specific conditions
+diabetes_patients <- cdm_setup$cdm$condition_occurrence %>%
+  filter(condition_concept_id == 201826) %>%  # Type 2 diabetes
+  distinct(person_id) %>%
+  collect()
+
+print(paste("Patients with diabetes:", nrow(diabetes_patients)))
+```
+
+### Joining Tables
+
+```{r joins, eval=FALSE}
+# Join person and visit data
+person_visits <- cdm_setup$cdm$person %>%
+  inner_join(cdm_setup$cdm$visit_occurrence, by = "person_id") %>%
+  mutate(age_at_visit = year(visit_start_date) - year_of_birth) %>%
+  select(person_id, gender_concept_id, age_at_visit, visit_concept_id) %>%
+  collect()
+
+head(person_visits)
+```
+
+## Creating Custom Synthetic Data
+
+For more control over your synthetic data:
+
+```{r synthetic, eval=FALSE}
+# Create synthetic data for 500 patients
+synthetic_db <- create_synthetic_omop_data(
+  n_patients = 500,
+  avg_visits_per_patient = 2,
+  avg_conditions_per_patient = 1.5
+)
+
+# Query the synthetic data
+person_count <- DBI::dbGetQuery(
+  synthetic_db, 
+  "SELECT COUNT(*) as count FROM person"
+)
+print(person_count)
+
+# List all tables
+tables <- DBI::dbListTables(synthetic_db)
+print(tables)
+```
+
+## Best Practices
+
+### Memory Management
+
+Always clean up your connections:
+
+```{r cleanup, eval=FALSE}
+# For CDMConnector objects
+cdmDisconnect(cdm_setup$cdm)
+
+# For direct database connections
+DBI::dbDisconnect(synthetic_db)
+```
+
+### Environment Setup
+
+Set up your environment for repeated use:
+
+```{r environment, eval=FALSE}
+# Set permanent data folder
+usethis::edit_r_environ()
+# Add: EUNOMIA_DATA_FOLDER="~/eunomia_data"
+```
+
+### Testing and Development
+
+Use OMOPSynth in your package tests:
+
+```{r testing, eval=FALSE}
+# In your test files
+test_that("my function works with OMOP data", {
+  cdm_setup <- setup_omop_cdm_eunomia("GiBleed")
+  
+  result <- my_omop_function(cdm_setup$cdm)
+  
+  expect_true(is.data.frame(result))
+  expect_gt(nrow(result), 0)
+  
+  cdmDisconnect(cdm_setup$cdm)
+})
+```
+
+## Common Use Cases
+
+### Package Development
+
+```{r package-dev, eval=FALSE}
+# Quick setup for testing your OMOP package
+cdm <- setup_omop_cdm_eunomia()$cdm
+
+# Test your functions
+result <- your_analysis_function(cdm)
+
+# Verify results
+expect_equal(nrow(result), expected_count)
+```
+
+### Educational Purposes
+
+```{r education, eval=FALSE}
+# Demonstrate OMOP CDM structure
+cdm_setup <- setup_omop_cdm_eunomia("synthea-covid19-10k")
+
+# Show students how to explore the data
+explore_cdm(cdm_setup$cdm)
+plot_cdm_demographics(cdm_setup$cdm)
+
+# Demonstrate common queries
+covid_cases <- cdm_setup$cdm$condition_occurrence %>%
+  filter(condition_concept_id == 37311061) %>%  # COVID-19
+  count() %>%
+  collect()
+```
+
+### Prototyping Analytics
+
+```{r prototyping, eval=FALSE}
+# Rapid prototyping of healthcare analytics
+cdm <- setup_omop_cdm_eunomia("synthea-heart-10k")$cdm
+
+# Prototype your analysis
+heart_disease_prevalence <- cdm$condition_occurrence %>%
+  filter(condition_concept_id %in% c(313217, 314866)) %>%
+  group_by(condition_concept_id) %>%
+  summarise(cases = n_distinct(person_id)) %>%
+  collect()
+```
+
+## Next Steps
+
+- Check out the [Advanced Usage](advanced-usage.html) vignette for more complex scenarios
+- Explore the [function reference](../reference/index.html) for detailed documentation
+- Visit the [OHDSI website](https://ohdsi.org/) to learn more about OMOP CDM
+
+## Getting Help
+
+- Package documentation: `?OMOPSynth`
+- Function help: `?setup_omop_cdm_eunomia`
+- Issues: [GitHub Issues](https://github.com/yourusername/OMOPSynth/issues)
+- OHDSI Forums: [forums.ohdsi.org](https://forums.ohdsi.org/)

@@ -1,8 +1,10 @@
+# vignettes/advanced-usage.Rmd
+
 ---
-title: "advanced-usage"
+title: "Advanced Usage of OMOPSynth"
 output: rmarkdown::html_vignette
 vignette: >
-  %\VignetteIndexEntry{advanced-usage}
+  %\VignetteIndexEntry{Advanced Usage of OMOPSynth}
   %\VignetteEngine{knitr::rmarkdown}
   %\VignetteEncoding{UTF-8}
 ---
@@ -10,10 +12,556 @@ vignette: >
 ```{r, include = FALSE}
 knitr::opts_chunk$set(
   collapse = TRUE,
-  comment = "#>"
+  comment = "#>",
+  fig.width = 7,
+  fig.height = 5
 )
 ```
 
-```{r setup}
+## Introduction
+
+This vignette covers advanced usage patterns for OMOPSynth, including custom data generation, integration with other OHDSI tools, performance optimization, and best practices for package development.
+
+```{r setup, message=FALSE}
 library(OMOPSynth)
+library(dplyr)
+library(ggplot2)
+library(DBI)
 ```
+
+## Advanced Synthetic Data Generation
+
+### Custom Patient Populations
+
+Create synthetic data with specific characteristics:
+
+```{r custom-populations, eval=FALSE}
+# Create elderly population (age 65+)
+elderly_db <- create_synthetic_omop_data(
+  n_patients = 1000,
+  start_year = 1920,
+  end_year = 1959,  # All patients will be 65+ in 2024
+  avg_conditions_per_patient = 3,  # More comorbidities
+  avg_drugs_per_patient = 6,       # More medications
+  seed = 456
+)
+
+# Create pediatric population
+pediatric_db <- create_synthetic_omop_data(
+  n_patients = 500,
+  start_year = 2005,
+  end_year = 2020,  # Ages 4-19 in 2024
+  avg_visits_per_patient = 4,      # More frequent visits
+  avg_conditions_per_patient = 1,  # Fewer conditions
+  avg_drugs_per_patient = 2,       # Fewer medications
+  seed = 789
+)
+```
+
+### Adding Custom Tables
+
+Extend the synthetic data with additional OMOP tables:
+
+```{r custom-tables, eval=FALSE}
+# Function to add measurement table
+add_measurement_table <- function(db, n_measurements_per_patient = 5) {
+  # Get existing patients
+  person_ids <- DBI::dbGetQuery(db, "SELECT person_id FROM person")$person_id
+  n_patients <- length(person_ids)
+  n_measurements <- n_patients * n_measurements_per_patient
+  
+  # Create measurement data
+  measurements <- data.frame(
+    measurement_id = 1:n_measurements,
+    person_id = sample(person_ids, n_measurements, replace = TRUE),
+    measurement_concept_id = sample(c(3025315, 3012888, 3004249), n_measurements, replace = TRUE), # Common labs
+    measurement_date = sample(seq(as.Date("2010-01-01"), as.Date("2023-12-31"), by = "day"), 
+                             n_measurements, replace = TRUE),
+    measurement_datetime = as.POSIXct(sample(seq(as.Date("2010-01-01"), as.Date("2023-12-31"), by = "day"), 
+                                           n_measurements, replace = TRUE)),
+    measurement_time = "00:00:00",
+    measurement_type_concept_id = 44818702,
+    operator_concept_id = 0,
+    value_as_number = round(rnorm(n_measurements, 100, 20), 2),
+    value_as_concept_id = 0,
+    unit_concept_id = sample(c(8753, 8840, 8961), n_measurements, replace = TRUE),
+    range_low = NA,
+    range_high = NA,
+    provider_id = sample(1:50, n_measurements, replace = TRUE),
+    visit_occurrence_id = NA,
+    visit_detail_id = NA,
+    measurement_source_value = paste0("LAB", sprintf("%06d", 1:n_measurements)),
+    measurement_source_concept_id = 0,
+    unit_source_value = sample(c("mg/dL", "mmol/L", "g/dL"), n_measurements, replace = TRUE),
+    value_source_value = "",
+    stringsAsFactors = FALSE
+  )
+  
+  # Write to database
+  DBI::dbWriteTable(db, "measurement", measurements, overwrite = TRUE)
+  return(db)
+}
+
+# Use the function
+synthetic_db <- create_synthetic_omop_data(n_patients = 100, verbose = FALSE)
+synthetic_db <- add_measurement_table(synthetic_db)
+```
+
+## Integration with OHDSI Tools
+
+### Using with CohortGenerator
+
+```{r cohort-generator, eval=FALSE}
+library(CohortGenerator)
+
+# Setup CDM
+cdm_setup <- setup_omop_cdm_eunomia("synthea-covid19-10k")
+
+# Define a simple cohort (diabetes patients)
+cohortDefinitionSet <- data.frame(
+  cohortId = 1,
+  cohortName = "Type 2 Diabetes",
+  sql = "SELECT DISTINCT person_id, condition_start_date as cohort_start_date, 
+         condition_end_date as cohort_end_date
+         FROM condition_occurrence 
+         WHERE condition_concept_id = 201826"
+)
+
+# Generate cohorts
+generateCohortSet(
+  connectionDetails = attr(cdm_setup$connection, "connectionDetails"),
+  cdmDatabaseSchema = "main",
+  cohortDatabaseSchema = "main",
+  cohortTableNames = CohortGenerator::getCohortTableNames(),
+  cohortDefinitionSet = cohortDefinitionSet
+)
+```
+
+### Using with FeatureExtraction
+
+```{r feature-extraction, eval=FALSE}
+library(FeatureExtraction)
+
+# Setup CDM
+cdm_setup <- setup_omop_cdm_eunomia("synthea-heart-10k")
+
+# Define feature extraction settings
+covariateSettings <- createCovariateSettings(
+  useDemographicsGender = TRUE,
+  useDemographicsAge = TRUE,
+  useConditionOccurrenceAnyTimePrior = TRUE,
+  useDrugExposureAnyTimePrior = TRUE
+)
+
+# Extract features for a sample of patients
+samplePersonIds <- cdm_setup$cdm$person %>% 
+  slice_sample(n = 100) %>% 
+  pull(person_id)
+
+# This would extract features (pseudo-code as full implementation requires more setup)
+# covariateData <- getDbCovariateData(
+#   connectionDetails = connectionDetails,
+#   cdmDatabaseSchema = "main",
+#   cohortDatabaseSchema = "main",
+#   cohortTable = "cohort",
+#   cohortId = 1,
+#   covariateSettings = covariateSettings
+# )
+```
+
+## Performance Optimization
+
+### Memory Management
+
+```{r memory-management, eval=FALSE}
+# Monitor memory usage
+monitor_memory <- function(label = "") {
+  gc_info <- gc()
+  memory_used <- sum(gc_info[, 2])
+  message(paste(label, "Memory used:", memory_used, "MB"))
+}
+
+# Efficient data processing
+process_large_dataset <- function(cdm, chunk_size = 10000) {
+  monitor_memory("Start")
+  
+  # Process in chunks to manage memory
+  total_persons <- cdm$person %>% tally() %>% pull(n)
+  
+  results <- list()
+  for (i in seq(1, total_persons, chunk_size)) {
+    chunk <- cdm$person %>% 
+      slice(i:min(i + chunk_size - 1, total_persons)) %>%
+      collect()
+    
+    # Process chunk
+    processed_chunk <- chunk %>%
+      mutate(age = 2024 - year_of_birth) %>%
+      filter(age >= 18)
+    
+    results[[length(results) + 1]] <- processed_chunk
+    
+    # Clean up
+    rm(chunk, processed_chunk)
+    gc()
+  }
+  
+  final_result <- bind_rows(results)
+  monitor_memory("End")
+  return(final_result)
+}
+```
+
+### Database Optimization
+
+```{r db-optimization, eval=FALSE}
+# Optimize DuckDB settings for large datasets
+optimize_duckdb_connection <- function(db_path) {
+  con <- DBI::dbConnect(
+    duckdb::duckdb(), 
+    db_path,
+    config = list(
+      memory_limit = "8GB",
+      threads = 4,
+      max_memory = "80%"
+    )
+  )
+  
+  # Set optimization pragmas
+  DBI::dbExecute(con, "PRAGMA enable_progress_bar")
+  DBI::dbExecute(con, "PRAGMA threads=4")
+  
+  return(con)
+}
+
+# Create indexes for better performance
+create_performance_indexes <- function(cdm) {
+  con <- cdm[[1]]$src$con
+  
+  # Create indexes on commonly queried columns
+  indexes <- list(
+    "CREATE INDEX IF NOT EXISTS idx_person_gender ON person(gender_concept_id)",
+    "CREATE INDEX IF NOT EXISTS idx_person_birth_year ON person(year_of_birth)",
+    "CREATE INDEX IF NOT EXISTS idx_visit_person ON visit_occurrence(person_id)",
+    "CREATE INDEX IF NOT EXISTS idx_visit_date ON visit_occurrence(visit_start_date)",
+    "CREATE INDEX IF NOT EXISTS idx_condition_person ON condition_occurrence(person_id)",
+    "CREATE INDEX IF NOT EXISTS idx_condition_concept ON condition_occurrence(condition_concept_id)",
+    "CREATE INDEX IF NOT EXISTS idx_drug_person ON drug_exposure(person_id)",
+    "CREATE INDEX IF NOT EXISTS idx_drug_concept ON drug_exposure(drug_concept_id)"
+  )
+  
+  for (index_sql in indexes) {
+    DBI::dbExecute(con, index_sql)
+  }
+  
+  message("Performance indexes created")
+}
+```
+
+## Advanced Analytics Examples
+
+### Cohort Studies
+
+```{r cohort-studies, eval=FALSE}
+# Function to perform a simple cohort study
+cohort_study_example <- function(cdm) {
+  # Define exposed cohort (patients with diabetes)
+  exposed <- cdm$condition_occurrence %>%
+    filter(condition_concept_id == 201826) %>%  # Type 2 diabetes
+    distinct(person_id) %>%
+    mutate(cohort = "exposed")
+  
+  # Define unexposed cohort (patients without diabetes)
+  unexposed <- cdm$person %>%
+    anti_join(exposed, by = "person_id") %>%
+    select(person_id) %>%
+    mutate(cohort = "unexposed")
+  
+  # Combine cohorts
+  study_population <- bind_rows(exposed, unexposed) %>%
+    left_join(cdm$person, by = "person_id") %>%
+    collect()
+  
+  # Analyze outcomes (e.g., cardiovascular events)
+  outcomes <- cdm$condition_occurrence %>%
+    filter(condition_concept_id %in% c(313217, 314866)) %>%  # Heart conditions
+    semi_join(study_population, by = "person_id") %>%
+    group_by(person_id) %>%
+    summarise(outcome_date = min(condition_start_date), .groups = "drop") %>%
+    collect()
+  
+  # Calculate incidence rates
+  results <- study_population %>%
+    left_join(outcomes, by = "person_id") %>%
+    mutate(has_outcome = !is.na(outcome_date)) %>%
+    group_by(cohort) %>%
+    summarise(
+      n = n(),
+      outcomes = sum(has_outcome),
+      incidence_rate = outcomes / n,
+      .groups = "drop"
+    )
+  
+  return(results)
+}
+```
+
+### Drug Utilization Studies
+
+```{r drug-utilization, eval=FALSE}
+# Analyze drug utilization patterns
+drug_utilization_analysis <- function(cdm, drug_concept_ids) {
+  drug_use <- cdm$drug_exposure %>%
+    filter(drug_concept_id %in% drug_concept_ids) %>%
+    left_join(cdm$person, by = "person_id") %>%
+    mutate(
+      age_at_exposure = year(drug_exposure_start_date) - year_of_birth,
+      age_group = case_when(
+        age_at_exposure < 18 ~ "0-17",
+        age_at_exposure < 35 ~ "18-34", 
+        age_at_exposure < 65 ~ "35-64",
+        TRUE ~ "65+"
+      )
+    ) %>%
+    collect()
+  
+  # Summarize by age group and gender
+  summary_stats <- drug_use %>%
+    group_by(age_group, gender_concept_id, drug_concept_id) %>%
+    summarise(
+      n_exposures = n(),
+      n_patients = n_distinct(person_id),
+      avg_days_supply = mean(days_supply, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  return(summary_stats)
+}
+```
+
+## Testing and Validation
+
+### Unit Testing for OMOP Packages
+
+```{r unit-testing, eval=FALSE}
+# Example test helper functions
+create_test_cdm <- function(n_patients = 10) {
+  synthetic_db <- create_synthetic_omop_data(
+    n_patients = n_patients,
+    verbose = FALSE,
+    seed = 123  # Consistent for testing
+  )
+  return(synthetic_db)
+}
+
+# Test data quality
+test_data_quality <- function(cdm) {
+  tests <- list()
+  
+  # Check person table
+  person_data <- cdm$person %>% collect()
+  tests$person_no_nulls <- all(!is.na(person_data$person_id))
+  tests$person_unique_ids <- length(unique(person_data$person_id)) == nrow(person_data)
+  tests$person_valid_genders <- all(person_data$gender_concept_id %in% c(8507, 8532))
+  
+  # Check referential integrity
+  visit_data <- cdm$visit_occurrence %>% collect()
+  tests$visit_person_integrity <- all(visit_data$person_id %in% person_data$person_id)
+  
+  # Return test results
+  return(tests)
+}
+```
+
+### Benchmark Performance
+
+```{r benchmarking, eval=FALSE}
+library(microbenchmark)
+
+# Benchmark different approaches
+benchmark_data_access <- function() {
+  cdm_setup <- setup_omop_cdm_eunomia("GiBleed", verbose = FALSE)
+  
+  benchmark_results <- microbenchmark(
+    "collect_all" = {
+      cdm_setup$cdm$person %>% collect()
+    },
+    "collect_sample" = {
+      cdm_setup$cdm$person %>% slice_sample(n = 100) %>% collect()
+    },
+    "summarize_remote" = {
+      cdm_setup$cdm$person %>% 
+        group_by(gender_concept_id) %>% 
+        summarise(count = n()) %>% 
+        collect()
+    },
+    times = 10
+  )
+  
+  cdmDisconnect(cdm_setup$cdm)
+  return(benchmark_results)
+}
+```
+
+## Integration with Other Tools
+
+### Export to Different Formats
+
+```{r export-formats, eval=FALSE}
+# Export CDM data to different formats
+export_cdm_data <- function(cdm, output_dir, format = "csv") {
+  tables_to_export <- c("person", "visit_occurrence", "condition_occurrence", "drug_exposure")
+  
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  
+  for (table_name in tables_to_export) {
+    if (table_name %in% names(cdm)) {
+      data <- cdm[[table_name]] %>% collect()
+      
+      file_path <- file.path(output_dir, paste0(table_name, ".", format))
+      
+      switch(format,
+        "csv" = readr::write_csv(data, file_path),
+        "parquet" = arrow::write_parquet(data, file_path),
+        "rds" = saveRDS(data, file_path)
+      )
+      
+      message("Exported ", table_name, " to ", file_path)
+    }
+  }
+}
+
+# Import from CSV files
+import_csv_to_cdm <- function(csv_dir) {
+  con <- DBI::dbConnect(RSQLite::SQLite(), ":memory:")
+  
+  csv_files <- list.files(csv_dir, pattern = "*.csv", full.names = TRUE)
+  
+  for (csv_file in csv_files) {
+    table_name <- tools::file_path_sans_ext(basename(csv_file))
+    data <- readr::read_csv(csv_file, show_col_types = FALSE)
+    DBI::dbWriteTable(con, table_name, data, overwrite = TRUE)
+    message("Imported ", table_name)
+  }
+  
+  return(con)
+}
+```
+
+### Integration with Databases
+
+```{r database-integration, eval=FALSE}
+# Connect to PostgreSQL with OMOP CDM
+setup_postgres_cdm <- function(host, port, database, username, password, schema) {
+  library(RPostgres)
+  
+  con <- DBI::dbConnect(
+    RPostgres::Postgres(),
+    host = host,
+    port = port,
+    dbname = database,
+    user = username,
+    password = password
+  )
+  
+  cdm <- CDMConnector::cdmFromCon(
+    con = con,
+    cdmSchema = schema,
+    writeSchema = paste0(schema, "_results"),
+    cdmName = "postgres_cdm"
+  )
+  
+  return(list(cdm = cdm, connection = con))
+}
+
+# Migrate synthetic data to PostgreSQL
+migrate_to_postgres <- function(synthetic_db, postgres_con, schema) {
+  tables <- DBI::dbListTables(synthetic_db)
+  
+  for (table_name in tables) {
+    data <- DBI::dbReadTable(synthetic_db, table_name)
+    
+    # Create schema if it doesn't exist
+    DBI::dbExecute(postgres_con, paste("CREATE SCHEMA IF NOT EXISTS", schema))
+    
+    # Write table
+    DBI::dbWriteTable(
+      postgres_con, 
+      Id(schema = schema, table = table_name),
+      data,
+      overwrite = TRUE
+    )
+    
+    message("Migrated ", table_name, " to PostgreSQL")
+  }
+}
+```
+
+## Best Practices for Package Development
+
+### Error Handling
+
+```{r error-handling, eval=FALSE}
+# Robust function with proper error handling
+robust_cdm_setup <- function(dataset_name = "GiBleed", retries = 3) {
+  last_error <- NULL
+  
+  for (attempt in 1:retries) {
+    tryCatch({
+      cdm_setup <- setup_omop_cdm_eunomia(dataset_name, verbose = FALSE)
+      return(cdm_setup)
+    }, error = function(e) {
+      last_error <<- e
+      message("Attempt ", attempt, " failed: ", e$message)
+      if (attempt < retries) {
+        message("Retrying in 2 seconds...")
+        Sys.sleep(2)
+      }
+    })
+  }
+  
+  stop("Failed to setup CDM after ", retries, " attempts. Last error: ", last_error$message)
+}
+```
+
+### Logging and Debugging
+
+```{r logging, eval=FALSE}
+# Simple logging system
+setup_logging <- function(log_level = "INFO") {
+  log_file <- file.path(tempdir(), "omopsynth.log")
+  
+  log_message <- function(message, level = "INFO") {
+    timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+    log_entry <- paste0("[", timestamp, "] [", level, "] ", message)
+    
+    # Write to file
+    cat(log_entry, "\n", file = log_file, append = TRUE)
+    
+    # Print to console if appropriate level
+    if (level %in% c("ERROR", "WARN") || log_level == "DEBUG") {
+      cat(log_entry, "\n")
+    }
+  }
+  
+  return(log_message)
+}
+
+# Usage in functions
+analyze_with_logging <- function(cdm) {
+  logger <- setup_logging()
+  
+  logger("Starting CDM analysis", "INFO")
+  
+  tryCatch({
+    stats <- explore_cdm(cdm, verbose = FALSE)
+    logger(paste("Analysis completed. Found", stats$total_persons, "persons"), "INFO")
+    return(stats)
+  }, error = function(e) {
+    logger(paste("Analysis failed:", e$message), "ERROR")
+    stop(e)
+  })
+}
+```
+
+This advanced vignette demonstrates sophisticated usage patterns including custom data generation, integration with other OHDSI tools, performance optimization, and professional development practices. It prepares users for real-world applications of the package.

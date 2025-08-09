@@ -1,22 +1,44 @@
 Package: OMOPSynth
-Title: What the Package Does (One Line, Title Case)
-Version: 0.0.0.9000
-Authors@R: 
-    person("First", "Last", , "first.last@example.com", role = c("aut", "cre"))
-Description: What the package does (one paragraph).
+Type: Package
+Title: Synthetic OMOP Common Data Model Database Setup
+Version: 0.1.0
+Authors@R: c(
+    person("Your", "Name", email = "your.email@example.com", role = c("aut", "cre"),
+           comment = c(ORCID = "0000-0000-0000-0000"))
+    )
+Description: Provides tools for setting up in-memory OMOP Common Data Model (CDM) 
+    databases with synthetic data for testing, development, and demonstration purposes. 
+    Supports multiple approaches including Eunomia datasets from the OHDSI community 
+    and custom synthetic data generation. The package facilitates rapid prototyping 
+    and testing of OMOP CDM applications without requiring access to real healthcare data.
 License: MIT + file LICENSE
 Encoding: UTF-8
+LazyData: true
 Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.2
-Suggests: 
-    knitr,
-    rmarkdown,
-    spelling,
-    testthat (>= 3.0.0)
-Config/testthat/edition: 3
-Imports: 
-    lifecycle
-Language: en-US
-VignetteBuilder: knitr
 URL: https://github.com/tjohnson250/OMOPSynth
 BugReports: https://github.com/tjohnson250/OMOPSynth/issues
+Depends: 
+    R (>= 4.0.0)
+Imports:
+    CDMConnector (>= 1.0.0),
+    DBI,
+    dplyr (>= 1.0.0),
+    ggplot2,
+    duckdb,
+    RSQLite,
+    DatabaseConnector,
+    SqlRender,
+    methods,
+    utils,
+    stats
+Suggests:
+    Eunomia,
+    testthat (>= 3.0.0),
+    knitr,
+    rmarkdown,
+    covr,
+    spelling
+VignetteBuilder: knitr
+Language: en-US
+SystemRequirements: Java (>= 8) for some OHDSI packages

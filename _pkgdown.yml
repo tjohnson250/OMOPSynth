@@ -1,0 +1,31 @@
+url: https://tjohnson250.github.io/OMOPSynth/
+template:
+  bootstrap: 5
+
+reference:
+- title: Setup Functions
+  desc: Functions for setting up OMOP CDM databases
+  contents:
+  - setup_omop_cdm_eunomia
+  - setup_omop_cdm_eunomia_direct
+  - create_synthetic_omop_data
+
+- title: Data Exploration
+  desc: Functions for exploring and visualizing CDM data
+  contents:
+  - explore_cdm
+  - plot_cdm_demographics
+
+- title: Demo and Utilities
+  desc: Demo functions and utilities
+  contents:
+  - demo_omop_cdm_setup
+  - check_and_install_packages
+  - get_available_datasets
+
+articles:
+- title: Get started
+  navbar: ~
+  contents:
+  - getting-started
+  - advanced-usage

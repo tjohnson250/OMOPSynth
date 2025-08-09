@@ -1,0 +1,16 @@
+# inst/extdata/example_config.yml
+# Example configuration for OMOPSynth
+database:
+  default_dataset: "GiBleed"
+  default_cdm_version: "5.3"
+  
+synthetic_data:
+  default_patients: 1000
+  default_seed: 123
+  
+paths:
+  eunomia_data_folder: "~/eunomia_data"
+  
+options:
+  verbose: true
+  create_plots: true
