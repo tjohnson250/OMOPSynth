@@ -31,7 +31,7 @@ First, install and load the package:
 
 ```{r setup, eval=FALSE}
 # Install from GitHub
-devtools::install_github("yourusername/OMOPSynth")
+devtools::install_github("tjohnson250/OMOPSynth")
 
 # Load the package
 library(OMOPSynth)
