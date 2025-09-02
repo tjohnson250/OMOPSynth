@@ -114,27 +114,83 @@ synthetic_db <- add_measurement_table(synthetic_db)
 ```{r cohort-generator, eval=FALSE}
 library(CohortGenerator)
 
-# Setup CDM
-cdm_setup <- setup_omop_cdm_eunomia("synthea-covid19-10k")
+# Setup CDM using direct connection for CohortGenerator compatibility
+cdm_setup <- setup_omop_cdm_eunomia_direct()
 
-# Define a simple cohort (diabetes patients)
+# Create cohort tables first
+createCohortTables(
+  connectionDetails = cdm_setup$connectionDetails,
+  cohortDatabaseSchema = "main",
+  cohortTableNames = CohortGenerator::getCohortTableNames()
+)
+
+# First, check what conditions are available in the dataset
+available_conditions <- DatabaseConnector::querySql(
+  cdm_setup$connection,
+  "SELECT condition_concept_id, COUNT(*) as patient_count
+   FROM condition_occurrence 
+   GROUP BY condition_concept_id 
+   ORDER BY patient_count DESC 
+   LIMIT 10"
+)
+print("Available conditions in dataset:")
+print(available_conditions)
+
+# Use the most common condition for the cohort
+most_common_condition <- available_conditions$CONDITION_CONCEPT_ID[1]
+
+# Define a cohort using the most common condition
 cohortDefinitionSet <- data.frame(
   cohortId = 1,
-  cohortName = "Type 2 Diabetes",
-  sql = "SELECT DISTINCT person_id, condition_start_date as cohort_start_date, 
-         condition_end_date as cohort_end_date
-         FROM condition_occurrence 
-         WHERE condition_concept_id = 201826"
+  cohortName = paste("Condition", most_common_condition),
+  sql = paste0("SELECT DISTINCT person_id, condition_start_date as cohort_start_date, 
+                condition_end_date as cohort_end_date
+                FROM condition_occurrence 
+                WHERE condition_concept_id = ", most_common_condition)
 )
 
 # Generate cohorts
 generateCohortSet(
-  connectionDetails = attr(cdm_setup$connection, "connectionDetails"),
+  connectionDetails = cdm_setup$connectionDetails,
   cdmDatabaseSchema = "main",
   cohortDatabaseSchema = "main",
   cohortTableNames = CohortGenerator::getCohortTableNames(),
   cohortDefinitionSet = cohortDefinitionSet
 )
+
+# Query the generated cohort
+cohort_counts <- DatabaseConnector::querySql(
+  cdm_setup$connection,
+  "SELECT cohort_definition_id, COUNT(*) as subject_count 
+   FROM cohort 
+   GROUP BY cohort_definition_id"
+)
+print(cohort_counts)
+
+# Get cohort subjects for further analysis
+diabetes_patients <- DatabaseConnector::querySql(
+  cdm_setup$connection,
+  "SELECT subject_id, cohort_start_date, cohort_end_date 
+   FROM cohort 
+   WHERE cohort_definition_id = 1"
+)
+head(diabetes_patients)
+
+# Analyze demographics of cohort subjects
+demographics <- DatabaseConnector::querySql(
+  cdm_setup$connection,
+  "SELECT p.gender_concept_id, 
+          COUNT(*) as patient_count,
+          AVG(2023 - p.year_of_birth) as avg_age
+   FROM cohort c
+   JOIN person p ON c.subject_id = p.person_id
+   WHERE c.cohort_definition_id = 1
+   GROUP BY p.gender_concept_id"
+)
+print(demographics)
+
+# Clean up
+DatabaseConnector::disconnect(cdm_setup$connection)
 ```
 
 ### Using with FeatureExtraction
