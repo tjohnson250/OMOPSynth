@@ -1,11 +1,11 @@
 # README.md
 
-# OMOPSynth <img src="man/figures/logo.png" align="right" height="139" alt="" />
+# OMOPSynth <img src="man/figures/logo.png" align="right" height="139"/>
 
 <!-- badges: start -->
-[![R-CMD-check](https://github.com/tjohnson250/OMOPSynth/actions/workflows/R-CMD-check.yaml/badge.svg)](https://github.com/yourusername/OMOPSynth/actions/workflows/R-CMD-check.yaml)
-[![CRAN status](https://www.r-pkg.org/badges/version/OMOPSynth)](https://CRAN.R-project.org/package=OMOPSynth)
-[![Lifecycle: experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](https://lifecycle.r-lib.org/articles/stages.html#experimental)
+
+[![R-CMD-check](https://github.com/tjohnson250/OMOPSynth/actions/workflows/R-CMD-check.yaml/badge.svg)](https://github.com/yourusername/OMOPSynth/actions/workflows/R-CMD-check.yaml) [![CRAN status](https://www.r-pkg.org/badges/version/OMOPSynth)](https://CRAN.R-project.org/package=OMOPSynth) [![Lifecycle: experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](https://lifecycle.r-lib.org/articles/stages.html#experimental)
+
 <!-- badges: end -->
 
 ## Overview
@@ -14,25 +14,25 @@ OMOPSynth provides tools for setting up in-memory OMOP Common Data Model (CDM) d
 
 ## Features
 
-- 🚀 **Quick Setup**: Get an OMOP CDM running in seconds
-- 📊 **Multiple Data Sources**: Eunomia datasets and custom synthetic data
-- 🔍 **Data Exploration**: Built-in functions for exploring CDM data
-- 📈 **Visualization**: Demographic and statistical plots
-- 🧪 **Testing Ready**: Perfect for unit tests and development
-- 📚 **Well Documented**: Comprehensive help and examples
+-   🚀 **Quick Setup**: Get an OMOP CDM running in seconds
+-   📊 **Multiple Data Sources**: Eunomia datasets and custom synthetic data
+-   🔍 **Data Exploration**: Built-in functions for exploring CDM data
+-   📈 **Visualization**: Demographic and statistical plots
+-   🧪 **Testing Ready**: Perfect for unit tests and development
+-   📚 **Well Documented**: Comprehensive help and examples
 
 ## Installation
 
 You can install the development version of OMOPSynth from [GitHub](https://github.com/) with:
 
-```r
+``` r
 # install.packages("devtools")
-devtools::install_github("yourusername/OMOPSynth")
+devtools::install_github("tjohnson250/OMOPSynth")
 ```
 
 ## Quick Start
 
-```r
+``` r
 library(OMOPSynth)
 
 # Run the complete demo
@@ -51,7 +51,7 @@ cdmDisconnect(cdm_setup$cdm)
 
 The package provides access to numerous synthetic datasets:
 
-```r
+``` r
 # See all available datasets
 datasets <- get_available_datasets()
 print(datasets)
@@ -65,7 +65,7 @@ heart_setup <- setup_omop_cdm_eunomia("synthea-heart-10k")
 
 Generate your own synthetic OMOP CDM data:
 
-```r
+``` r
 # Create synthetic data for 1000 patients
 synthetic_db <- create_synthetic_omop_data(n_patients = 1000)
 
@@ -78,29 +78,29 @@ DBI::dbDisconnect(synthetic_db)
 
 ## Use Cases
 
-- **Package Development**: Test OMOP CDM packages without real data
-- **Education**: Learn OMOP CDM structure and analysis
-- **Prototyping**: Rapidly prototype healthcare analytics
-- **Unit Testing**: Create reproducible test datasets
-- **Demonstrations**: Show OMOP CDM capabilities
+-   **Package Development**: Test OMOP CDM packages without real data
+-   **Education**: Learn OMOP CDM structure and analysis
+-   **Prototyping**: Rapidly prototype healthcare analytics
+-   **Unit Testing**: Create reproducible test datasets
+-   **Demonstrations**: Show OMOP CDM capabilities
 
 ## Documentation
 
-- Get started: `vignette("getting-started", package = "OMOPSynth")`
-- Advanced usage: `vignette("advanced-usage", package = "OMOPSynth")`
-- Function reference: [Package website](https://yourusername.github.io/OMOPSynth/)
+-   Get started: `vignette("getting-started", package = "OMOPSynth")`
+-   Advanced usage: `vignette("advanced-usage", package = "OMOPSynth")`
+-   Function reference: [Package website](https://yourusername.github.io/OMOPSynth/)
 
 ## Requirements
 
-- R ≥ 4.0.0
-- Java ≥ 8 (for some OHDSI packages)
+-   R ≥ 4.0.0
+-   Java ≥ 8 (for some OHDSI packages)
 
 ## Related Packages
 
-- [CDMConnector](https://darwin-eu.github.io/CDMConnector/): Core OMOP CDM interface
-- [Eunomia](https://github.com/OHDSI/Eunomia): OHDSI synthetic datasets
-- [DatabaseConnector](https://github.com/OHDSI/DatabaseConnector): OHDSI database utilities
-- [OHDSI Tools](https://ohdsi.org/software-tools/): Complete OHDSI ecosystem
+-   [CDMConnector](https://darwin-eu.github.io/CDMConnector/): Core OMOP CDM interface
+-   [Eunomia](https://github.com/OHDSI/Eunomia): OHDSI synthetic datasets
+-   [DatabaseConnector](https://github.com/OHDSI/DatabaseConnector): OHDSI database utilities
+-   [OHDSI Tools](https://ohdsi.org/software-tools/): Complete OHDSI ecosystem
 
 ## Contributing
 

@@ -1,0 +1,195 @@
+---
+title: "temp"
+format: html
+editor: visual
+---
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+## Running Code
+
+When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+
+```{r}
+library(TrialEmulation)
+```
+
+You can add options to executable code like this
+
+```{r}
+data("trial_example")
+```
+
+The `echo: false` option disables the printing of code (only output is displayed).
+
+```{r}
+tedat <- data_preparation(trial_example, estimand_type = "As-Treated")
+```
+
+```{r}
+# Create the dataframe
+df <- data.frame(
+  id = c(1, 2, 1, 2, 3),
+  eligible = c(1, 1, 1, 0, 1),
+  period = c(1, 1, 2, 2, 2),
+  outcome = c(0, 0, 0, 0, 0),
+  treatment = c(0, 1, 0, 1, 0),
+  censored = c(0, 0, 0, 0, 0)
+)
+
+# View the dataframe
+print(df)
+```
+
+```{r}
+df_expanded <- data_preparation(df, estimand_type = "As-Treated")
+df_expanded[["data"]] |> select(id, trial_period, followup_time, treatment, outcome)
+```
+
+```{r}
+generate_clinical_data <- function(N, num_periods, 
+                                   prob_continue_visit = 0.7,
+                                   prob_treatment_no_risk = 0.3,
+                                   prob_treatment_with_risk = 0.6) {
+  
+  # Initialize data frame to store all patient visits
+  clinical_data <- data.frame()
+  
+  for (patient_id in 1:N) {
+    # Randomly assign first study period for this patient (1 to num_periods)
+    first_period <- sample(1:num_periods, 1)
+    
+    # Initialize patient characteristics
+    has_risk_factor <- runif(1) < 0.10  # 10% have risk factor at first visit
+    has_received_treatment <- FALSE
+    has_outcome <- FALSE
+    
+    # Generate visits for this patient
+    for (period in first_period:num_periods) {
+      # Determine if patient visits in this period
+      if (period == first_period) {
+        visits_this_period <- TRUE  # Always visit in first period
+      } else {
+        # Probability of continuing to visit (you can adjust this parameter)
+        visits_this_period <- runif(1) < prob_continue_visit
+      }
+      
+      if (!visits_this_period) {
+        next  # Skip this period if no visit
+      }
+      
+      # If not first period, check if patient develops risk factor (1% chance per period)
+      if (period > first_period && !has_risk_factor) {
+        has_risk_factor <- runif(1) < 0.01
+      }
+      
+      # Determine treatment assignment (only if not previously treated)
+      receives_treatment <- FALSE
+      if (!has_received_treatment && !has_outcome) {
+        if (has_risk_factor) {
+          receives_treatment <- runif(1) < prob_treatment_with_risk
+        } else {
+          receives_treatment <- runif(1) < prob_treatment_no_risk
+        }
+        
+        if (receives_treatment) {
+          has_received_treatment <- TRUE
+        }
+      }
+      
+      # Determine if outcome occurs in this period (only if not already occurred)
+      develops_outcome <- FALSE
+      if (!has_outcome) {
+        if (has_received_treatment) {
+          develops_outcome <- runif(1) < 0.05  # 5% chance with treatment
+        } else {
+          develops_outcome <- runif(1) < 0.20  # 20% chance without treatment
+        }
+        
+        if (develops_outcome) {
+          has_outcome <- TRUE
+        }
+      }
+      
+      # Record this visit
+      visit_data <- data.frame(
+        id = patient_id,
+        period = period,
+        first_period = first_period,
+        has_risk_factor = has_risk_factor,
+        treatment = receives_treatment,
+        ever_treated = has_received_treatment,
+        outcome = develops_outcome,
+        ever_outcome = has_outcome
+      )
+      
+      clinical_data <- rbind(clinical_data, visit_data)
+      
+      # If patient develops outcome, they might stop participating
+      # (optional - you can remove this if patients should continue regardless)
+      if (develops_outcome && runif(1) < 0.5) {
+        break
+      }
+    }
+  }
+  
+  return(clinical_data)
+}
+
+# Example usage:
+set.seed(123)  # For reproducible results
+N <- 100
+num_periods <- 10
+
+# Generate the dataset
+clinical_trial_data <- generate_clinical_data(N, num_periods)
+
+# Display summary statistics
+cat("Dataset Summary:\n")
+cat("Total observations:", nrow(clinical_trial_data), "\n")
+cat("Unique patients:", length(unique(clinical_trial_data$id)), "\n")
+cat("Patients with risk factor at any time:", 
+    sum(clinical_trial_data$has_risk_factor), "\n")
+cat("Treatment administrations:", 
+    sum(clinical_trial_data$treatment), "\n")
+cat("Patients ever treated:", 
+    length(unique(clinical_trial_data$id[clinical_trial_data$ever_treated])), "\n")
+cat("Outcome occurrences:", 
+    sum(clinical_trial_data$outcome), "\n")
+
+# Display first few rows
+head(clinical_trial_data, 15)
+
+# Create summary table by patient
+patient_summary <- clinical_trial_data %>%
+  group_by(id) %>%
+  summarise(
+    first_period = first(first_period),
+    total_visits = n(),
+    periods_observed = paste(sort(unique(period)), collapse = ","),
+    ever_had_risk = any(has_risk_factor),
+    ever_treated = any(treatment),
+    treatment_period = ifelse(any(treatment), 
+                             period[which(treatment)[1]], NA),
+    ever_outcome = any(outcome),
+    outcome_period = ifelse(any(outcome), 
+                           period[which(outcome)[1]], NA),
+    .groups = 'drop'
+  )
+
+cat("\n\nPatient Summary (first 10 patients):\n")
+print(patient_summary[1:10, ])
+
+# Additional analysis: Treatment effectiveness
+cat("\n\nTreatment Analysis:\n")
+treated_patients <- unique(clinical_trial_data$id[clinical_trial_data$ever_treated])
+untreated_patients <- setdiff(unique(clinical_trial_data$id), treated_patients)
+
+outcome_rate_treated <- mean(patient_summary$ever_outcome[patient_summary$id %in% treated_patients])
+outcome_rate_untreated <- mean(patient_summary$ever_outcome[patient_summary$id %in% untreated_patients])
+
+cat("Outcome rate in treated patients:", round(outcome_rate_treated * 100, 1), "%\n")
+cat("Outcome rate in untreated patients:", round(outcome_rate_untreated * 100, 1), "%\n")
+```

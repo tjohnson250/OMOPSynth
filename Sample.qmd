@@ -1,0 +1,240 @@
+---
+title: "Sample OMOP queries"
+format: html
+editor: visual
+---
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+## Running Code
+
+When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+
+```{r}
+# install.packages("devtools")
+devtools::install_github("tjohnson250/OMOPSynth")
+```
+
+You can add options to executable code like this
+
+```{r}
+get_available_datasets(
+)
+```
+
+```{r}
+cdm_setup <- setup_omop_cdm_eunomia("synthea-covid19-200k")
+# DB connection is here
+con <- cdm_setup$connection
+```
+
+```{r}
+dbListTables(con)
+```
+
+```{r}
+co <- dbReadTable(con, "condition_occurrence")
+co
+unique(co$condition_concept_id)
+
+```
+
+Now look up what these concept codes mean:
+
+```{r}
+library(dplyr)
+c <- dbReadTable(con, "concept")
+c
+codes <- unique(inner_join(c, co, by = c("concept_id" = "condition_concept_id")) |> 
+         select(concept_id, concept_name, vocabulary_id))
+codes
+```
+
+```{r}
+dbGetQuery(cdm_setup$connection, "WITH concepts AS (SELECT DISTINCT c.vocabulary_id, c.concept_id, c.concept_code FROM concept c
+    WHERE (
+        -- ICD-10-CM codes for MI
+        c.concept_code LIKE 'I21%'  )) SELECT concept_id FROM concepts")
+```
+
+```{r}
+
+dbGetQuery(cdm_setup$connection, "SELECT DISTINCT co.condition_concept_id FROM condition_occurrence co
+    WHERE (
+        -- ICD-10-CM codes for MI
+        co.condition_concept_id IN (45562340,				
+45605779	,			
+35207685	,			
+1326590		,		
+45533436	,			
+1569128		,		
+1326589		,		
+45557536		,		
+1326588		,		
+45572080)  )")
+```
+
+```{r}
+DBI::dbGetQuery(cdm_setup$connection, "SELECT DISTINCT p.person_id FROM person p
+    INNER JOIN condition_occurrence co ON p.person_id = co.person_id
+    INNER JOIN concept c ON co.condition_concept_id = c.concept_id
+    WHERE (
+        -- ICD-10-CM codes for MI
+        c.concept_code LIKE 'I21%'  -- STEMI
+        OR c.concept_code LIKE 'I22%'  -- Subsequent STEMI  
+        OR c.concept_code LIKE 'I23%'  -- Complications following STEMI
+        -- ICD-9-CM codes for MI
+        OR c.concept_code LIKE '410%'  -- ICD-9 Acute MI
+    )
+    AND c.vocabulary_id IN ('ICD10CM', 'ICD9CM')
+    AND c.invalid_reason IS NULL  -- Only valid concepts
+")
+```
+
+```{r}
+DBI::dbGetQuery(cdm_setup$connection, "SELECT DISTINCT p.person_id FROM person p
+    INNER JOIN condition_occurrence co ON p.person_id = co.person_id
+    INNER JOIN concept c ON co.condition_concept_id = c.concept_id
+    WHERE (
+        -- ICD-10-CM codes for MI
+        c.concept_code LIKE 'I21%'  -- STEMI
+        OR c.concept_code LIKE 'I22%'  -- Subsequent STEMI  
+        OR c.concept_code LIKE 'I23%'  -- Complications following STEMI
+        -- ICD-9-CM codes for MI
+        OR c.concept_code LIKE '410%'  -- ICD-9 Acute MI
+    )
+    AND c.vocabulary_id IN ('ICD10CM', 'ICD9CM')
+    AND c.invalid_reason IS NULL  -- Only valid concepts
+")
+```
+
+```{r}
+
+```
+
+```{r}
+dbGetQuery(cdm_setup$connection, "WITH cardiovascular_patients AS (
+    -- Prior Myocardial Infarction
+    SELECT DISTINCT p.person_id
+    FROM main.person p
+    INNER JOIN main.condition_occurrence co ON p.person_id = co.person_id
+    INNER JOIN main.concept c ON co.condition_concept_id = c.concept_id
+    WHERE (
+        -- ICD codes
+        c.concept_code LIKE 'I21%'  -- STEMI
+        OR c.concept_code LIKE 'I22%'  -- Subsequent STEMI
+        OR c.concept_code LIKE 'I23%'  -- Complications following STEMI
+        OR c.concept_code LIKE '410%'  -- ICD-9 Acute MI
+        -- SNOMED CT codes for Myocardial Infarction
+        OR c.concept_code IN ('22298006', '57054005', '73795002', '401303003', '401314000')  -- Various MI types
+        OR c.concept_code IN ('70211005', '233824003', '54329005', '304914007')  -- ST elevation MI variants
+        OR c.concept_code IN ('401303003', '401314000', '233819005')  -- Non-ST elevation MI
+    )
+    AND c.vocabulary_id IN ('ICD10CM', 'ICD9CM', 'SNOMED')
+    AND c.invalid_reason IS NULL
+    
+    UNION
+    
+    -- Prior Stroke (Ischemic and Hemorrhagic)
+    SELECT DISTINCT p.person_id
+    FROM main.person p
+    INNER JOIN main.condition_occurrence co ON p.person_id = co.person_id
+    INNER JOIN main.concept c ON co.condition_concept_id = c.concept_id
+    WHERE (
+        -- ICD codes
+        c.concept_code LIKE 'I63%'  -- Cerebral infarction
+        OR c.concept_code LIKE 'I61%'  -- Intracerebral hemorrhage
+        OR c.concept_code LIKE 'I60%'  -- Subarachnoid hemorrhage
+        OR c.concept_code LIKE '434%'  -- ICD-9 Occlusion of cerebral arteries
+        OR c.concept_code LIKE '431%'  -- ICD-9 Intracerebral hemorrhage
+        OR c.concept_code LIKE '430%'  -- ICD-9 Subarachnoid hemorrhage
+        -- SNOMED CT codes for Stroke
+        OR c.concept_code IN ('230690007', '422504002', '432504007')  -- Cerebral infarction variants
+        OR c.concept_code IN ('71444005', '274100004', '425957003')  -- Intracerebral hemorrhage
+        OR c.concept_code IN ('21454007', '127295002')  -- Subarachnoid hemorrhage
+        OR c.concept_code IN ('266257000', '195230003', '195206000')  -- Various stroke types
+    )
+    AND c.vocabulary_id IN ('ICD10CM', 'ICD9CM', 'SNOMED')
+    AND c.invalid_reason IS NULL
+    
+    UNION
+    
+    -- Prior Revascularization Procedures
+    SELECT DISTINCT p.person_id
+    FROM main.person p
+    INNER JOIN main.procedure_occurrence po ON p.person_id = po.person_id
+    INNER JOIN main.concept c ON po.procedure_concept_id = c.concept_id
+    WHERE (
+        -- ICD-10-PCS Heart and Great Vessels procedures
+        (c.concept_code LIKE '02%' AND c.vocabulary_id = 'ICD10PCS')
+        -- ICD-9 CABG procedures
+        OR (c.concept_code IN ('36.01', '36.02', '36.03', '36.04', '36.05', '36.06', '36.07', 
+                              '36.09', '36.1', '36.11', '36.12', '36.13', '36.14', '36.15', 
+                              '36.16', '36.17', '36.19') AND c.vocabulary_id = 'ICD9Proc')
+        -- CPT PCI codes
+        OR (c.concept_code IN ('92920', '92921', '92924', '92928', '92929', '92933',
+                              '92934', '92937', '92938', '92941', '92943', '92944') 
+            AND c.vocabulary_id = 'CPT4')
+        -- SNOMED CT procedure codes
+        OR (c.concept_code IN ('175008', '119564002', '175066001', '81266008')  -- CABG procedures
+            AND c.vocabulary_id = 'SNOMED')
+        OR (c.concept_code IN ('415070008', '397431004', '429639007', '175046002')  -- PCI procedures
+            AND c.vocabulary_id = 'SNOMED')
+        OR (c.concept_code IN ('232717009', '3546002', '428488008')  -- Coronary revascularization
+            AND c.vocabulary_id = 'SNOMED')
+    )
+    AND c.invalid_reason IS NULL
+    
+    UNION
+    
+    -- Secondary Prevention Statin Indication
+    -- Patients with statin prescriptions AND cardiovascular risk factors
+    SELECT DISTINCT p.person_id
+    FROM main.person p
+    INNER JOIN main.drug_exposure de ON p.person_id = de.person_id
+    INNER JOIN main.concept drug_c ON de.drug_concept_id = drug_c.concept_id
+    INNER JOIN main.condition_occurrence co ON p.person_id = co.person_id
+    INNER JOIN main.concept cond_c ON co.condition_concept_id = cond_c.concept_id
+    WHERE (
+        -- Statin medications using RxNorm concept codes
+        -- Note: These are example concept_ids - you'll need to query the concept table 
+        -- to get the actual OMOP concept_ids for statins
+        de.drug_concept_id IN (
+            SELECT concept_id FROM main.concept 
+            WHERE vocabulary_id = 'RxNorm' 
+            AND (
+                concept_name LIKE '%atorvastatin%'
+                OR concept_name LIKE '%simvastatin%'
+                OR concept_name LIKE '%rosuvastatin%'
+                OR concept_name LIKE '%pravastatin%'
+                OR concept_name LIKE '%lovastatin%'
+                OR concept_name LIKE '%fluvastatin%'
+                OR concept_name LIKE '%pitavastatin%'
+            )
+            AND invalid_reason IS NULL
+        )
+    )
+    AND (
+        -- High cardiovascular risk conditions warranting secondary prevention
+        -- ICD codes
+        cond_c.concept_code LIKE 'I25%'   -- Chronic ischemic heart disease
+        OR cond_c.concept_code LIKE 'I70%'   -- Atherosclerosis
+        OR cond_c.concept_code LIKE 'E11.5%' -- Type 2 diabetes with circulatory complications
+        OR cond_c.concept_code LIKE 'E10.5%' -- Type 1 diabetes with circulatory complications
+        OR cond_c.concept_code = 'Z87.891'   -- Personal history of nicotine dependence
+        OR cond_c.concept_code LIKE 'I10%'   -- Hypertension
+        -- SNOMED CT codes for cardiovascular risk conditions
+        OR cond_c.concept_code IN ('413844008', '194828000', '443502000')  -- Chronic ischemic heart disease
+        OR cond_c.concept_code IN ('38716007', '441574008', '155382002')   -- Atherosclerosis variants
+        OR cond_c.concept_code IN ('368581000119106', '421895002')         -- Diabetes with vascular complications
+        OR cond_c.concept_code IN ('38341003', '59621000')                 -- Hypertension
+        OR cond_c.concept_code IN ('266919005', '365980008')               -- Nicotine dependence history
+    )
+    AND cond_c.vocabulary_id IN ('ICD10CM', 'ICD9CM', 'SNOMED')
+    AND cond_c.invalid_reason IS NULL
+)
+
+SELECT person_id FROM cardiovascular_patients;")
+```
