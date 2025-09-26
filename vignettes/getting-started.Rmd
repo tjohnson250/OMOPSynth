@@ -83,7 +83,7 @@ See what datasets are available:
 
 ```{r datasets}
 datasets <- get_available_datasets()
-head(datasets, 10)
+datasets
 ```
 
 ### Setup with Specific Dataset
