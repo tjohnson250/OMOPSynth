@@ -1,0 +1,2686 @@
+---
+title: "Database Graph Visualization"
+author: "Todd R. Johnson"
+date: "2025-02-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(DBI)
+library(odbc)
+library(igraph)
+library(visNetwork)
+library(dplyr)
+```
+
+```{r}
+visualize_db_schema <- function(con) {
+  
+  # Get table information
+  tables_query <- "
+    SELECT 
+      t.name AS table_name,
+      p.rows AS row_count
+    FROM sys.tables t
+    INNER JOIN sys.partitions p ON t.object_id = p.object_id
+    WHERE p.index_id IN (0,1)
+  "
+  tables_df <- dbGetQuery(con, tables_query)
+  
+  print(tables_df)
+  
+  # Get foreign key relationships
+  relationships_query <- "
+    SELECT 
+      pk_table = pk.TABLE_NAME,
+      fk_table = fk.TABLE_NAME
+    FROM 
+      INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc
+      JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS fk ON rc.CONSTRAINT_NAME = fk.CONSTRAINT_NAME
+      JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS pk ON rc.UNIQUE_CONSTRAINT_NAME = pk.CONSTRAINT_NAME
+  "
+  relationships_df <- dbGetQuery(con, relationships_query)
+  
+  print(relationships_df)
+  
+  # Create nodes dataframe
+  nodes <- data.frame(
+    id = tables_df$table_name,
+    label = tables_df$table_name,
+    title = paste("Table:", tables_df$table_name, "<br>Rows:", tables_df$row_count),
+    value = log(tables_df$row_count + 1) * 5,  # Scale node size logarithmically
+    group = "table"
+  )
+  
+  # Create edges dataframe
+  edges <- data.frame(
+    from = relationships_df$pk_table,
+    to = relationships_df$fk_table,
+    arrows = "to"  # Show direction of relationship
+  )
+  
+  # Create and customize the network visualization
+  network <- visNetwork(nodes, edges) %>%
+    visOptions(
+      highlightNearest = TRUE,
+      nodesIdSelection = TRUE
+    ) %>%
+    visPhysics(
+      solver = "forceAtlas2Based",
+      forceAtlas2Based = list(
+        gravitationalConstant = -50,
+        centralGravity = 0.01,
+        springLength = 200,
+        springConstant = 0.08
+      )
+    ) %>%
+    visGroups(groupname = "table", color = list(
+      background = "#97C2FC",
+      border = "#2B7CE9",
+      highlight = list(background = "#D2E5FF", border = "#2B7CE9")
+    ))
+  
+  # Close database connection
+  dbDisconnect(con)
+  
+  return(network)
+}
+
+# Usage example:
+# network <- visualize_db_schema(
+#   server = "your_server",
+#   database = "your_database",
+#   uid = "your_username",
+#   pwd = "your_password"
+# )
+# network  # Display the visualization
+```
+
+```{r}
+con <- connection <- DBI::dbConnect(odbc::odbc(), "SQLODBCD17CDM", encoding="UTF-8", Database = "CDW")
+```
+
+```{r}
+network <- visualize_db_schema(con, infer_relationships = FALSE)
+network
+```
+
+This is a second version that will attempt to guess primary and foreign key relationships
+
+```{r}
+visualize_db_schema <- function(con, 
+                              infer_relationships = TRUE,
+                              name_matching_threshold = 0.8) {
+  
+  # Get table and column information
+  columns_query <- "
+    SELECT 
+      TABLE_NAME,
+      COLUMN_NAME,
+      DATA_TYPE,
+      CHARACTER_MAXIMUM_LENGTH,
+      NUMERIC_PRECISION
+    FROM INFORMATION_SCHEMA.COLUMNS
+  "
+  columns_df <- dbGetQuery(con, columns_query)
+  
+  # Get table row counts
+  tables_query <- "
+    SELECT 
+      t.name AS table_name,
+      p.rows AS row_count
+    FROM sys.tables t
+    INNER JOIN sys.partitions p ON t.object_id = p.object_id
+    WHERE p.index_id IN (0,1)
+  "
+  tables_df <- dbGetQuery(con, tables_query)
+  
+  # Try to get explicit relationships first
+  relationships_query <- "
+    SELECT 
+      pk_table = pk.TABLE_NAME,
+      fk_table = fk.TABLE_NAME
+    FROM 
+      INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc
+      JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS fk ON rc.CONSTRAINT_NAME = fk.CONSTRAINT_NAME
+      JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS pk ON rc.UNIQUE_CONSTRAINT_NAME = pk.CONSTRAINT_NAME
+  "
+  relationships_df <- tryCatch({
+    dbGetQuery(con, relationships_query)
+  }, error = function(e) {
+    data.frame(pk_table = character(), fk_table = character())
+  })
+  
+  # Infer relationships if requested
+  if (infer_relationships) {
+    inferred_relationships <- infer_table_relationships(
+      columns_df, 
+      name_matching_threshold
+    )
+    
+    # Combine explicit and inferred relationships
+    relationships_df <- unique(
+      rbind(
+        relationships_df,
+        inferred_relationships
+      )
+    )
+  }
+  
+  # Create nodes dataframe
+  nodes <- data.frame(
+    id = tables_df$table_name,
+    label = tables_df$table_name,
+    title = paste("Table:", tables_df$table_name, 
+                 "<br>Rows:", tables_df$row_count,
+                 "<br>Columns:", table(columns_df$TABLE_NAME)[tables_df$table_name]),
+    value = log(tables_df$row_count + 1) * 5,
+    group = "table"
+  )
+  
+  # Create edges dataframe with relationship type
+  edges <- data.frame(
+    from = relationships_df$pk_table,
+    to = relationships_df$fk_table,
+    arrows = "to",
+    title = ifelse(relationships_df$pk_table %in% relationships_df$pk_table[1:nrow(relationships_df)],
+                  "Explicit FK Relationship",
+                  "Inferred Relationship")
+  )
+  
+  # Create and customize the network visualization
+  network <- visNetwork(nodes, edges) %>%
+    visOptions(
+      highlightNearest = TRUE,
+      nodesIdSelection = TRUE
+    ) %>%
+    visPhysics(
+      solver = "forceAtlas2Based",
+      forceAtlas2Based = list(
+        gravitationalConstant = -50,
+        centralGravity = 0.01,
+        springLength = 200,
+        springConstant = 0.08,
+        damping = 1.1 # TRJ added to prevent graph from spinning
+      )
+    ) %>%
+    visGroups(groupname = "table", color = list(
+      background = "#97C2FC",
+      border = "#2B7CE9",
+      highlight = list(background = "#D2E5FF", border = "#2B7CE9")
+    ))
+  
+  
+  return(network)
+}
+
+infer_table_relationships <- function(columns_df, name_matching_threshold = 0.8) {
+  potential_relationships <- data.frame(
+    pk_table = character(),
+    fk_table = character(),
+    stringsAsFactors = FALSE
+  )
+  
+  # Get unique tables
+  tables <- unique(columns_df$TABLE_NAME)
+  
+  for (table1 in tables) {
+    for (table2 in tables) {
+      if (table1 != table2) {
+        # Get columns for both tables
+        cols1 <- columns_df[columns_df$TABLE_NAME == table1, ]
+        cols2 <- columns_df[columns_df$TABLE_NAME == table2, ]
+        
+        # Look for potential relationships based on naming patterns
+        for (col1 in cols1$COLUMN_NAME) {
+          for (col2 in cols2$COLUMN_NAME) {
+            # Check if columns have matching data types
+            type1 <- columns_df$DATA_TYPE[columns_df$TABLE_NAME == table1 & 
+                                        columns_df$COLUMN_NAME == col1][1]
+            type2 <- columns_df$DATA_TYPE[columns_df$TABLE_NAME == table2 & 
+                                        columns_df$COLUMN_NAME == col2][1]
+            
+            # Only proceed if we have valid types to compare
+            if (!is.na(type1) && !is.na(type2) && type1 == type2) {
+              # Check common foreign key patterns
+              patterns <- c(
+                # Check if table1 name (singular) + "Id" exists in table2
+                paste0(gsub("s$", "", table1), "Id"),
+                # Check if table1 name + "Id" exists in table2
+                paste0(table1, "Id"),
+                # Check for exact column name match
+                col1
+              )
+              
+              if (any(sapply(patterns, function(p) {
+                agrepl(p, col2, max.distance = 1 - name_matching_threshold)
+              }))) {
+                potential_relationships <- rbind(
+                  potential_relationships,
+                  data.frame(
+                    pk_table = table1,
+                    fk_table = table2,
+                    stringsAsFactors = FALSE
+                  )
+                )
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  return(unique(potential_relationships))
+}
+```
+
+```{r}
+connection <- DBI::dbConnect(odbc::odbc(), "SQLODBCD17CDM", encoding="UTF-8", Database = "MHH")
+network <- visualize_db_schema(connection)
+network
+```
+
+A third version that enhances edge tooltips for DBs that have a defined schema
+
+```{r}
+library(DBI)
+library(odbc)
+library(igraph)
+library(visNetwork)
+library(dplyr)
+
+visualize_db_schema <- function(con, 
+                              infer_relationships = TRUE,
+                              name_matching_threshold = 0.8) {
+
+  
+  # Get table and column information
+  columns_query <- "
+    SELECT 
+      TABLE_NAME,
+      COLUMN_NAME,
+      DATA_TYPE,
+      CHARACTER_MAXIMUM_LENGTH,
+      NUMERIC_PRECISION
+    FROM INFORMATION_SCHEMA.COLUMNS
+  "
+  columns_df <- dbGetQuery(con, columns_query)
+  
+  # Get table row counts
+  tables_query <- "
+    SELECT 
+      t.name AS table_name,
+      p.rows AS row_count
+    FROM sys.tables t
+    INNER JOIN sys.partitions p ON t.object_id = p.object_id
+    WHERE p.index_id IN (0,1)
+  "
+  tables_df <- dbGetQuery(con, tables_query)
+  
+  # Try to get explicit relationships with additional details
+  relationships_query <- "
+    SELECT 
+      pk_table = pk.TABLE_NAME,
+      fk_table = fk.TABLE_NAME,
+      fk_column = kcu.COLUMN_NAME,
+      constraint_name = rc.CONSTRAINT_NAME,
+      row_count = (
+        SELECT COUNT(*)
+        FROM (
+          SELECT DISTINCT kcu.COLUMN_NAME
+          FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+          WHERE kcu.CONSTRAINT_NAME = rc.CONSTRAINT_NAME
+        ) subquery
+      )
+    FROM 
+      INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc
+      JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS fk ON rc.CONSTRAINT_NAME = fk.CONSTRAINT_NAME
+      JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS pk ON rc.UNIQUE_CONSTRAINT_NAME = pk.CONSTRAINT_NAME
+      JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu ON rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+  "
+  relationships_df <- tryCatch({
+    dbGetQuery(con, relationships_query)
+  }, error = function(e) {
+    data.frame(pk_table = character(), fk_table = character())
+  })
+  
+  # Infer relationships if requested
+  if (infer_relationships) {
+    inferred_relationships <- infer_table_relationships(
+      columns_df, 
+      name_matching_threshold
+    )
+    
+    # Combine explicit and inferred relationships
+    relationships_df <- unique(
+      rbind(
+        relationships_df,
+        inferred_relationships
+      )
+    )
+  }
+  
+  # Create nodes dataframe
+  nodes <- data.frame(
+    id = tables_df$table_name,
+    label = tables_df$table_name,
+    title = paste("Table:", tables_df$table_name, 
+                 "<br>Rows:", tables_df$row_count,
+                 "<br>Columns:", table(columns_df$TABLE_NAME)[tables_df$table_name]),
+    value = log(tables_df$row_count + 1) * 5,
+    group = "table"
+  )
+  
+ # Create edges dataframe with detailed tooltips
+  if ("constraint_name" %in% names(relationships_df)) {
+    edges <- data.frame(
+      from = relationships_df$pk_table,
+      to = relationships_df$fk_table,
+      arrows = "to",
+      title = sprintf(
+        "Foreign Key: %s\nColumn: %s\nDistinct Values: %s",
+        relationships_df$constraint_name,
+        relationships_df$fk_column,
+        format(relationships_df$row_count, big.mark = ",")
+      )
+    )
+  } else {
+    edges <- data.frame(
+      from = relationships_df$pk_table,
+      to = relationships_df$fk_table,
+      arrows = "to",
+      title = "Inferred Relationship"
+    )
+  }
+  
+  print(edges)
+  
+  # Create and customize the network visualization
+  network <- visNetwork(nodes, edges) %>%
+    visOptions(
+      highlightNearest = TRUE,
+      nodesIdSelection = TRUE
+    ) %>%
+    visPhysics(
+      solver = "forceAtlas2Based",
+      forceAtlas2Based = list(
+        gravitationalConstant = -50,
+        centralGravity = 0.01,
+        springLength = 200,
+        springConstant = 0.08
+      )
+    ) %>%
+    visGroups(groupname = "table", color = list(
+      background = "#97C2FC",
+      border = "#2B7CE9",
+      highlight = list(background = "#D2E5FF", border = "#2B7CE9")
+    ))
+  
+  # Close database connection
+  dbDisconnect(con)
+  
+  return(network)
+}
+
+infer_table_relationships <- function(columns_df, name_matching_threshold = 0.8) {
+  potential_relationships <- data.frame(
+    pk_table = character(),
+    fk_table = character(),
+    stringsAsFactors = FALSE
+  )
+  
+  # Get unique tables
+  tables <- unique(columns_df$TABLE_NAME)
+  
+  for (table1 in tables) {
+    for (table2 in tables) {
+      if (table1 != table2) {
+        # Get columns for both tables
+        cols1 <- columns_df[columns_df$TABLE_NAME == table1, ]
+        cols2 <- columns_df[columns_df$TABLE_NAME == table2, ]
+        
+        # Look for potential relationships based on naming patterns
+        for (col1 in cols1$COLUMN_NAME) {
+          for (col2 in cols2$COLUMN_NAME) {
+            # Check if columns have matching data types
+            type1 <- columns_df$DATA_TYPE[columns_df$TABLE_NAME == table1 & 
+                                        columns_df$COLUMN_NAME == col1][1]
+            type2 <- columns_df$DATA_TYPE[columns_df$TABLE_NAME == table2 & 
+                                        columns_df$COLUMN_NAME == col2][1]
+            
+            # Only proceed if we have valid types to compare
+            if (!is.na(type1) && !is.na(type2) && type1 == type2) {
+              # Check common foreign key patterns
+              patterns <- c(
+                # Check if table1 name (singular) + "Id" exists in table2
+                paste0(gsub("s$", "", table1), "Id"),
+                # Check if table1 name + "Id" exists in table2
+                paste0(table1, "Id"),
+                # Check for exact column name match
+                col1
+              )
+              
+              if (any(sapply(patterns, function(p) {
+                agrepl(p, col2, max.distance = 1 - name_matching_threshold)
+              }))) {
+                potential_relationships <- rbind(
+                  potential_relationships,
+                  data.frame(
+                    pk_table = table1,
+                    fk_table = table2,
+                    stringsAsFactors = FALSE
+                  )
+                )
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  return(unique(potential_relationships))
+}
+
+# Usage example:
+# network <- visualize_db_schema(
+#   server = "your_server",
+#   database = "your_database",
+#   uid = "your_username",
+#   pwd = "your_password",
+#   infer_relationships = TRUE,
+#   name_matching_threshold = 0.8
+# )
+```
+
+```{r}
+con <- connection <- DBI::dbConnect(odbc::odbc(), "SQLODBCD17CDM", encoding="UTF-8", Database = "CDW")
+
+network <- visualize_db_schema(con, infer_relationships = FALSE)
+network
+```
+
+Another version with different code to get row counts for edges
+
+```{r}
+library(DBI)
+library(odbc)
+library(igraph)
+library(visNetwork)
+library(dplyr)
+
+visualize_db_schema <- function(con, 
+                               infer_relationships = TRUE,
+                               name_matching_threshold = 0.8) {
+  # Get table and column information
+  columns_query <- "
+    SELECT 
+      TABLE_NAME,
+      COLUMN_NAME,
+      DATA_TYPE,
+      CHARACTER_MAXIMUM_LENGTH,
+      NUMERIC_PRECISION
+    FROM INFORMATION_SCHEMA.COLUMNS
+  "
+  columns_df <- dbGetQuery(con, columns_query)
+  
+  # Get table row counts
+  tables_query <- "
+    SELECT 
+      t.name AS table_name,
+      p.rows AS row_count
+    FROM sys.tables t
+    INNER JOIN sys.partitions p ON t.object_id = p.object_id
+    WHERE p.index_id IN (0,1)
+  "
+  tables_df <- dbGetQuery(con, tables_query)
+  
+  # First get the relationships without counts
+  base_relationships_query <- "
+    SELECT 
+      pk_table = pk.TABLE_NAME,
+      fk_table = fk.TABLE_NAME,
+      fk_column = kcu.COLUMN_NAME,
+      constraint_name = rc.CONSTRAINT_NAME
+    FROM 
+      INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc
+      JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS fk ON rc.CONSTRAINT_NAME = fk.CONSTRAINT_NAME
+      JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS pk ON rc.UNIQUE_CONSTRAINT_NAME = pk.CONSTRAINT_NAME
+      JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu ON rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+  "
+  
+  relationships_df <- tryCatch({
+    base_rels <- dbGetQuery(con, base_relationships_query)
+    
+    # For each relationship, get the distinct count
+    if (nrow(base_rels) > 0) {
+      counts <- lapply(1:nrow(base_rels), function(i) {
+        count_query <- sprintf(
+          "SELECT COUNT(DISTINCT [%s]) as count FROM [%s]",
+          base_rels$fk_column[i],
+          base_rels$fk_table[i]
+        )
+        tryCatch({
+          count <- dbGetQuery(con, count_query)$count
+          if (length(count) == 0) 0 else count
+        }, error = function(e) 0)
+      })
+      
+      base_rels$row_count <- unlist(counts)
+      base_rels
+    } else {
+      data.frame(
+        pk_table = character(),
+        fk_table = character(),
+        fk_column = character(),
+        constraint_name = character(),
+        row_count = numeric()
+      )
+    }
+  }, error = function(e) {
+    data.frame(
+      pk_table = character(),
+      fk_table = character(),
+      fk_column = character(),
+      constraint_name = character(),
+      row_count = numeric()
+    )
+  })
+  
+  # Infer relationships if requested
+  if (infer_relationships) {
+    inferred_relationships <- infer_table_relationships(
+      columns_df, 
+      name_matching_threshold
+    )
+    
+    # Combine explicit and inferred relationships
+    if (nrow(inferred_relationships) > 0) {
+      # Add columns to match the explicit relationships structure
+      inferred_relationships$fk_column <- inferred_relationships$inferred_fk_column
+      inferred_relationships$constraint_name <- paste0("INFERRED_", 1:nrow(inferred_relationships))
+      inferred_relationships$row_count <- 0
+      inferred_relationships$is_inferred <- TRUE
+    }
+    
+    # Add is_inferred column to existing relationships
+    if (nrow(relationships_df) > 0) {
+      relationships_df$is_inferred <- FALSE
+    }
+    
+    # Combine the datasets
+    relationships_df <- rbind(
+      relationships_df,
+      inferred_relationships[, names(relationships_df)]
+    )
+  }
+  
+  # Calculate column counts per table
+  column_counts <- sapply(tables_df$table_name, function(tname) {
+    sum(columns_df$TABLE_NAME == tname)
+  })
+
+  # Create nodes dataframe
+  nodes <- data.frame(
+    id = tables_df$table_name,
+    label = tables_df$table_name,
+    title = paste("Table:", tables_df$table_name, 
+                 "<br>Rows:", format(tables_df$row_count, big.mark=","),
+                 "<br>Columns:", column_counts[tables_df$table_name]),
+    value = log(tables_df$row_count + 1) * 5,
+    group = "table"
+  )
+  
+  # Create edges dataframe with detailed tooltips
+  if (nrow(relationships_df) > 0) {
+    edges <- data.frame(
+      from = relationships_df$pk_table,
+      to = relationships_df$fk_table,
+      arrows = "to",
+      title = character(nrow(relationships_df))  # Initialize with empty strings
+    )
+    
+    # Create tooltips based on whether the relationship is inferred or not
+    for (i in 1:nrow(relationships_df)) {
+      if (isTRUE(relationships_df$is_inferred[i])) {
+        edges$title[i] <- sprintf(
+          "INFERRED RELATIONSHIP\nPrimary Key Table: %s\nForeign Key Table: %s\nForeign Key Column: %s",
+          relationships_df$pk_table[i],
+          relationships_df$fk_table[i],
+          relationships_df$fk_column[i]
+        )
+      } else {
+        edges$title[i] <- sprintf(
+          "Foreign Key: %s\nColumn: %s\nDistinct Values: %s",
+          relationships_df$constraint_name[i],
+          relationships_df$fk_column[i],
+          format(relationships_df$row_count[i], big.mark = ",")
+        )
+      }
+    }
+  } else {
+    edges <- data.frame(
+      from = character(),
+      to = character(),
+      arrows = character(),
+      title = character()
+    )
+  }
+  
+  # Create and customize the network visualization
+  network <- visNetwork(nodes, edges) %>%
+    visOptions(
+      highlightNearest = TRUE,
+      nodesIdSelection = TRUE
+    ) %>%
+    visPhysics(
+      solver = "forceAtlas2Based",
+      forceAtlas2Based = list(
+        gravitationalConstant = -50,
+        centralGravity = 0.01,
+        springLength = 200,
+        springConstant = 0.08
+      )
+    ) %>%
+    visGroups(groupname = "table", color = list(
+      background = "#97C2FC",
+      border = "#2B7CE9",
+      highlight = list(background = "#D2E5FF", border = "#2B7CE9")
+    ))
+  
+  return(network)
+}
+
+infer_table_relationships <- function(columns_df, name_matching_threshold = 0.8) {
+  potential_relationships <- data.frame(
+    pk_table = character(),
+    fk_table = character(),
+    inferred_pk_column = character(),
+    inferred_fk_column = character(),
+    stringsAsFactors = FALSE
+  )
+  
+  # Get unique tables
+  tables <- unique(columns_df$TABLE_NAME)
+  
+  for (table1 in tables) {
+    for (table2 in tables) {
+      if (table1 != table2) {
+        # Get columns for both tables
+        cols1 <- columns_df[columns_df$TABLE_NAME == table1, ]
+        cols2 <- columns_df[columns_df$TABLE_NAME == table2, ]
+        
+        # Look for potential relationships based on naming patterns
+        for (col1 in cols1$COLUMN_NAME) {
+          for (col2 in cols2$COLUMN_NAME) {
+            # Check if columns have matching data types
+            type1 <- columns_df$DATA_TYPE[columns_df$TABLE_NAME == table1 & 
+                                        columns_df$COLUMN_NAME == col1][1]
+            type2 <- columns_df$DATA_TYPE[columns_df$TABLE_NAME == table2 & 
+                                        columns_df$COLUMN_NAME == col2][1]
+            
+            # Only proceed if we have valid types to compare
+            if (!is.na(type1) && !is.na(type2) && type1 == type2) {
+              # Check common foreign key patterns
+              patterns <- c(
+                # Check if table1 name (singular) + "Id" exists in table2
+                paste0(gsub("s$", "", table1), "Id"),
+                # Check if table1 name + "Id" exists in table2
+                paste0(table1, "Id"),
+                # Check for exact column name match
+                col1
+              )
+              
+              # Check if any pattern matches
+              pattern_matches <- sapply(patterns, function(p) {
+                agrepl(p, col2, max.distance = 1 - name_matching_threshold)
+              })
+              
+              if (any(pattern_matches)) {
+                potential_relationships <- rbind(
+                  potential_relationships,
+                  data.frame(
+                    pk_table = table1,
+                    fk_table = table2,
+                    inferred_pk_column = col1,
+                    inferred_fk_column = col2,
+                    stringsAsFactors = FALSE
+                  )
+                )
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  return(unique(potential_relationships))
+}
+
+# Usage example:
+# # First create your connection
+# con <- DBI::dbConnect(odbc::odbc(),
+#                      Driver = "SQL Server",
+#                      Server = "your_server",
+#                      Database = "your_database",
+#                      UID = "your_username",
+#                      PWD = "your_password")
+#
+# # Then pass it to the visualization function
+# network <- visualize_db_schema(
+#   con = con,
+#   infer_relationships = TRUE,
+#   name_matching_threshold = 0.8
+# )
+#
+# # Don't forget to close the connection when you're done
+# dbDisconnect(con)
+```
+
+Conside adding a matrix view of the network showing number and % of relations as a heatmap.
+
+```{r}
+con <- connection <- DBI::dbConnect(odbc::odbc(), "SQLODBCD17CDM", encoding="UTF-8", Database = "CDW")
+
+network <- visualize_db_schema(con, infer_relationships = FALSE)
+network
+```
+
+```{r}
+con <- connection <- DBI::dbConnect(odbc::odbc(), "SQLODBCD17CDM", encoding="UTF-8", Database = "MHH")
+
+network <- visualize_db_schema(con, infer_relationships = TRUE, name_matching_threshold = .9)
+network
+dbDisconnect(con)
+```
+
+```{r}
+
+get_field_mappings <- function(db_conn) {
+  # Load required libraries
+  library(DBI)
+  library(dplyr)
+  
+  # Get list of all tables from information schema
+  # The query varies slightly by database type, so we'll detect and handle the common ones
+  db_type <- class(db_conn)[1]
+  
+  if (grepl("PostgreSQL", db_type)) {
+    query <- "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
+  } else if (grepl("MySQL", db_type)) {
+    # Get current database name first
+    db_name <- dbGetQuery(db_conn, "SELECT DATABASE() as db_name")$db_name[1]
+    query <- sprintf("SELECT table_name FROM information_schema.tables WHERE table_schema = '%s'", db_name)
+  } else if (grepl("SQLite", db_type)) {
+    # SQLite doesn't have information_schema, use sqlite_master instead
+    query <- "SELECT name as table_name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+  } else if (grepl("Microsoft SQL Server", db_type)) {
+    query <- "SELECT table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE'"
+  } else if (grepl("Oracle", db_type)) {
+    query <- "SELECT table_name FROM user_tables"
+  } else {
+    # Generic approach for other databases
+    query <- "SELECT table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE'"
+  }
+  
+  # Execute the query to get table names
+  tables_df <- dbGetQuery(db_conn, query)
+  all_tables <- tables_df$table_name
+  
+  # Initialize a list to store the mapping tables
+  mapping_tables <- list()
+  
+  # Loop through each table
+  for (table_name in all_tables) {
+    # Get column names from information schema
+    if (grepl("SQLite", class(db_conn)[1])) {
+      # For SQLite, use pragma
+      field_query <- sprintf("PRAGMA table_info(%s)", dbQuoteIdentifier(db_conn, table_name))
+      field_results <- dbGetQuery(db_conn, field_query)
+      table_fields <- field_results$name
+    } else {
+      # For other databases, use information_schema.columns
+      db_type <- class(db_conn)[1]
+      
+      if (grepl("PostgreSQL|MySQL", db_type)) {
+        # For PostgreSQL/MySQL
+        if (grepl("MySQL", db_type)) {
+          db_name <- dbGetQuery(db_conn, "SELECT DATABASE() as db_name")$db_name[1]
+          field_query <- sprintf("SELECT column_name FROM information_schema.columns WHERE table_name = '%s' AND table_schema = '%s'", 
+                               table_name, db_name)
+        } else {
+          field_query <- sprintf("SELECT column_name FROM information_schema.columns WHERE table_name = '%s' AND table_schema = 'public'", 
+                               table_name)
+        }
+      } else if (grepl("Microsoft SQL Server", db_type)) {
+        field_query <- sprintf("SELECT column_name FROM information_schema.columns WHERE table_name = '%s'", table_name)
+      } else if (grepl("Oracle", db_type)) {
+        field_query <- sprintf("SELECT column_name FROM user_tab_columns WHERE table_name = '%s'", toupper(table_name))
+      } else {
+        # Generic approach
+        field_query <- sprintf("SELECT column_name FROM information_schema.columns WHERE table_name = '%s'", table_name)
+      }
+      
+      field_results <- dbGetQuery(db_conn, field_query)
+      table_fields <- field_results$column_name
+    }
+    
+    # Find fields that start with "raw_" (case-insensitive)
+    raw_fields <- grep("^raw_", table_fields, value = TRUE, ignore.case = TRUE)
+    
+    if (length(raw_fields) > 0) {
+      # For each raw field, check if there's a corresponding non-raw field
+      for (raw_field in raw_fields) {
+        # Get the potential non-raw field name (without "raw_" prefix)
+        # We use a case-insensitive regex to handle both upper and lowercase prefixes
+        non_raw_field <- sub("^raw_", "", raw_field, ignore.case = TRUE)
+        
+        # Check if the non-raw field exists in the table (case-insensitive comparison)
+        matching_fields <- which(tolower(table_fields) == tolower(non_raw_field))
+        if (length(matching_fields) > 0) {
+          # Use the actual field name (with correct casing) from the table
+          non_raw_field <- table_fields[matching_fields[1]]
+          # It's a match - create a mapping table
+          message(paste0("Found mapping in table '", table_name, "': ", raw_field, " -> ", non_raw_field))
+          
+          # Query to get distinct values, their mappings, and count occurrences
+          query <- paste0("SELECT ", raw_field, ", ", non_raw_field, 
+                         ", COUNT(*) as row_count FROM ", table_name, 
+                         " GROUP BY ", raw_field, ", ", non_raw_field,
+                         " ORDER BY ", raw_field)
+          
+          # Execute query and get the mapping data
+          mapping_data <- dbGetQuery(db_conn, query)
+          
+          # Name the mapping table based on the fields
+          mapping_name <- paste0(table_name, "_", non_raw_field, "_mapping")
+          
+          # Rename columns to be more descriptive
+          names(mapping_data) <- c("raw_value", "mapped_value", "row_count")
+          
+          # Add to our list of mapping tables
+          mapping_tables[[mapping_name]] <- mapping_data
+        }
+      }
+    }
+  }
+  
+  # Return the list of mapping tables
+  return(mapping_tables)
+}
+
+# Example usage:
+# library(DBI)
+# library(RSQLite)  # Or any other database driver
+# 
+# # Create a database connection
+# db_conn <- dbConnect(RSQLite::SQLite(), "path/to/your/database.db")
+# 
+# # Get all the mappings
+# mappings <- get_field_mappings(db_conn)
+# 
+# # View a specific mapping
+# print(mappings$table_name_field_name_mapping)
+# 
+# # Close the connection when done
+# dbDisconnect(db_conn)
+```
+
+```{r}
+get_field_mappings <- function(db_conn) {
+  # Load required libraries
+  library(DBI)
+  library(dplyr)
+  
+  # Get list of all tables from information schema with their schemas
+  # The query varies slightly by database type, so we'll detect and handle the common ones
+  db_type <- class(db_conn)[1]
+  
+  if (grepl("PostgreSQL", db_type)) {
+    query <- "SELECT table_schema, table_name 
+              FROM information_schema.tables 
+              WHERE table_schema NOT IN ('pg_catalog', 'information_schema')"
+  } else if (grepl("MySQL", db_type)) {
+    # Get current database name first
+    db_name <- dbGetQuery(db_conn, "SELECT DATABASE() as db_name")$db_name[1]
+    query <- "SELECT table_schema, table_name 
+              FROM information_schema.tables 
+              WHERE table_schema NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')"
+  } else if (grepl("SQLite", db_type)) {
+    # SQLite doesn't have schemas in the same way, treat all tables as being in a single schema
+    query <- "SELECT 'main' as table_schema, name as table_name 
+              FROM sqlite_master 
+              WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+  } else if (grepl("Microsoft SQL Server", db_type)) {
+    query <- "SELECT table_schema, table_name 
+              FROM information_schema.tables 
+              WHERE table_schema NOT IN ('sys')"
+  } else if (grepl("Oracle", db_type)) {
+    query <- "SELECT owner as table_schema, table_name 
+              FROM all_tables 
+              WHERE owner NOT IN ('SYS', 'SYSTEM')"
+  } else {
+    # Generic approach for other databases
+    query <- "SELECT table_schema, table_name 
+              FROM information_schema.tables 
+              WHERE table_schema NOT IN ('information_schema')"
+  }
+  
+  # Execute the query to get schema and table names
+  tables_df <- dbGetQuery(db_conn, query)
+  
+  # Initialize a list to store the mapping tables
+  mapping_tables <- list()
+  
+  # Loop through each table
+  for (i in 1:nrow(tables_df)) {
+    schema_name <- tables_df$table_schema[i]
+    table_name <- tables_df$table_name[i]
+    
+    # Get column names from information schema
+    if (grepl("SQLite", db_type)) {
+      # For SQLite, use pragma
+      field_query <- sprintf("PRAGMA table_info(%s)", dbQuoteIdentifier(db_conn, table_name))
+      field_results <- dbGetQuery(db_conn, field_query)
+      table_fields <- field_results$name
+    } else {
+      # For other databases, use information_schema.columns
+      if (grepl("PostgreSQL|MySQL", db_type)) {
+        # For PostgreSQL/MySQL
+        field_query <- sprintf("SELECT column_name 
+                              FROM information_schema.columns 
+                              WHERE table_name = '%s' AND table_schema = '%s'", 
+                              table_name, schema_name)
+      } else if (grepl("Microsoft SQL Server", db_type)) {
+        field_query <- sprintf("SELECT column_name 
+                              FROM information_schema.columns 
+                              WHERE table_name = '%s' AND table_schema = '%s'", 
+                              table_name, schema_name)
+      } else if (grepl("Oracle", db_type)) {
+        field_query <- sprintf("SELECT column_name 
+                              FROM all_tab_columns 
+                              WHERE table_name = '%s' AND owner = '%s'", 
+                              toupper(table_name), schema_name)
+      } else {
+        # Generic approach
+        field_query <- sprintf("SELECT column_name 
+                              FROM information_schema.columns 
+                              WHERE table_name = '%s' AND table_schema = '%s'", 
+                              table_name, schema_name)
+      }
+      
+      field_results <- dbGetQuery(db_conn, field_query)
+      table_fields <- field_results$column_name
+    }
+    
+    # Find fields that start with "raw_" (case-insensitive)
+    raw_fields <- grep("^raw_", table_fields, value = TRUE, ignore.case = TRUE)
+    
+    if (length(raw_fields) > 0) {
+      # For each raw field, check if there's a corresponding non-raw field
+      for (raw_field in raw_fields) {
+        # Get the potential non-raw field name (without "raw_" prefix)
+        # We use a case-insensitive regex to handle both upper and lowercase prefixes
+        non_raw_field <- sub("^raw_", "", raw_field, ignore.case = TRUE)
+        
+        # Check if the non-raw field exists in the table (case-insensitive comparison)
+        matching_fields <- which(tolower(table_fields) == tolower(non_raw_field))
+        if (length(matching_fields) > 0) {
+          # Use the actual field name (with correct casing) from the table
+          non_raw_field <- table_fields[matching_fields[1]]
+          
+          # It's a match - create a mapping table
+          message(sprintf("Found mapping in '%s.%s': %s -> %s", 
+                        schema_name, table_name, raw_field, non_raw_field))
+          
+          # Construct fully qualified table name with schema
+          qualified_table_name <- if (schema_name == "main" && grepl("SQLite", db_type)) {
+            # SQLite doesn't need schema qualification for main schema
+            dbQuoteIdentifier(db_conn, table_name)
+          } else {
+            # Other databases need schema qualification
+            paste0(
+              dbQuoteIdentifier(db_conn, schema_name), 
+              ".", 
+              dbQuoteIdentifier(db_conn, table_name)
+            )
+          }
+          
+          # Quote column names for SQL safety
+          quoted_raw_field <- dbQuoteIdentifier(db_conn, raw_field)
+          quoted_non_raw_field <- dbQuoteIdentifier(db_conn, non_raw_field)
+          
+          # Query to get distinct values, their mappings, and count occurrences
+          query <- sprintf("SELECT %s, %s, COUNT(*) as row_count 
+                          FROM %s 
+                          GROUP BY %s, %s
+                          ORDER BY %s",
+                          quoted_raw_field, quoted_non_raw_field,
+                          qualified_table_name,
+                          quoted_raw_field, quoted_non_raw_field,
+                          quoted_raw_field)
+          
+          # Safely execute query and get the mapping data
+          tryCatch({
+            mapping_data <- dbGetQuery(db_conn, query)
+            
+            # Name the mapping table based on the schema, table and fields
+            mapping_name <- paste0(schema_name, "_", table_name, "_", non_raw_field, "_mapping")
+            
+            # Rename columns to be more descriptive
+            names(mapping_data) <- c("raw_value", "mapped_value", "row_count")
+            
+            # Add to our list of mapping tables
+            mapping_tables[[mapping_name]] <- mapping_data
+          }, error = function(e) {
+            warning(sprintf("Error querying mapping for %s.%s - %s: %s", 
+                           schema_name, table_name, raw_field, e$message))
+          })
+        }
+      }
+    }
+  }
+  
+  # Return the list of mapping tables
+  return(mapping_tables)
+}
+
+# Example usage:
+# library(DBI)
+# library(RPostgres)  # Or any other database driver
+# 
+# # Create a database connection
+# db_conn <- dbConnect(RPostgres::Postgres(),
+#                     host = "localhost",
+#                     port = 5432,
+#                     dbname = "mydb",
+#                     user = "username",
+#                     password = "password")
+# 
+# # Get all the mappings
+# mappings <- get_field_mappings(db_conn)
+# 
+# # View a specific mapping
+# print(mappings$schema_name_table_name_field_name_mapping)
+# 
+# # Close the connection when done
+# dbDisconnect(db_conn)
+```
+
+```{r}
+get_field_mappings <- function(db_conn, schemas = NULL) {
+  # Load required libraries
+  library(DBI)
+  library(dplyr)
+  
+  # Get list of all tables from information schema with their schemas
+  # The query varies slightly by database type, so we'll detect and handle the common ones
+  db_type <- class(db_conn)[1]
+  
+  if (grepl("PostgreSQL", db_type)) {
+    query <- "SELECT table_schema, table_name 
+              FROM information_schema.tables 
+              WHERE table_schema NOT IN ('pg_catalog', 'information_schema')"
+  } else if (grepl("MySQL", db_type)) {
+    # Get current database name first
+    db_name <- dbGetQuery(db_conn, "SELECT DATABASE() as db_name")$db_name[1]
+    query <- "SELECT table_schema, table_name 
+              FROM information_schema.tables 
+              WHERE table_schema NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')"
+  } else if (grepl("SQLite", db_type)) {
+    # SQLite doesn't have schemas in the same way, treat all tables as being in a single schema
+    query <- "SELECT 'main' as table_schema, name as table_name 
+              FROM sqlite_master 
+              WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+  } else if (grepl("Microsoft SQL Server", db_type)) {
+    query <- "SELECT table_schema, table_name 
+              FROM information_schema.tables 
+              WHERE table_schema NOT IN ('sys')"
+  } else if (grepl("Oracle", db_type)) {
+    query <- "SELECT owner as table_schema, table_name 
+              FROM all_tables 
+              WHERE owner NOT IN ('SYS', 'SYSTEM')"
+  } else {
+    # Generic approach for other databases
+    query <- "SELECT table_schema, table_name 
+              FROM information_schema.tables 
+              WHERE table_schema NOT IN ('information_schema')"
+  }
+  
+  # Execute the query to get schema and table names
+  tables_df <- dbGetQuery(db_conn, query)
+  
+  # Filter tables by specified schemas if provided
+  if (!is.null(schemas)) {
+    # Convert schemas input to character vector if it's not already
+    if (is.character(schemas) && length(schemas) == 1) {
+      schemas <- c(schemas)  # Convert single string to vector
+    }
+    
+    # Case-insensitive schema filtering
+    tables_df <- tables_df[tolower(tables_df$table_schema) %in% tolower(schemas), ]
+    
+    if (nrow(tables_df) == 0) {
+      warning("No tables found in the specified schemas. Check schema names.")
+      return(list())
+    }
+  }
+  
+  # Initialize a list to store the mapping tables
+  mapping_tables <- list()
+  
+  # Loop through each table
+  for (i in 1:nrow(tables_df)) {
+    schema_name <- tables_df$table_schema[i]
+    table_name <- tables_df$table_name[i]
+    
+    # Get column names from information schema
+    if (grepl("SQLite", db_type)) {
+      # For SQLite, use pragma
+      field_query <- sprintf("PRAGMA table_info(%s)", dbQuoteIdentifier(db_conn, table_name))
+      field_results <- dbGetQuery(db_conn, field_query)
+      table_fields <- field_results$name
+    } else {
+      # For other databases, use information_schema.columns
+      if (grepl("PostgreSQL|MySQL", db_type)) {
+        # For PostgreSQL/MySQL
+        field_query <- sprintf("SELECT column_name 
+                              FROM information_schema.columns 
+                              WHERE table_name = '%s' AND table_schema = '%s'", 
+                              table_name, schema_name)
+      } else if (grepl("Microsoft SQL Server", db_type)) {
+        field_query <- sprintf("SELECT column_name 
+                              FROM information_schema.columns 
+                              WHERE table_name = '%s' AND table_schema = '%s'", 
+                              table_name, schema_name)
+      } else if (grepl("Oracle", db_type)) {
+        field_query <- sprintf("SELECT column_name 
+                              FROM all_tab_columns 
+                              WHERE table_name = '%s' AND owner = '%s'", 
+                              toupper(table_name), schema_name)
+      } else {
+        # Generic approach
+        field_query <- sprintf("SELECT column_name 
+                              FROM information_schema.columns 
+                              WHERE table_name = '%s' AND table_schema = '%s'", 
+                              table_name, schema_name)
+      }
+      
+      field_results <- dbGetQuery(db_conn, field_query)
+      table_fields <- field_results$column_name
+    }
+    
+    # Find fields that start with "raw_" (case-insensitive)
+    raw_fields <- grep("^raw_", table_fields, value = TRUE, ignore.case = TRUE)
+    
+    if (length(raw_fields) > 0) {
+      # For each raw field, check if there's a corresponding non-raw field
+      for (raw_field in raw_fields) {
+        # Get the potential non-raw field name (without "raw_" prefix)
+        # We use a case-insensitive regex to handle both upper and lowercase prefixes
+        non_raw_field <- sub("^raw_", "", raw_field, ignore.case = TRUE)
+        
+        # Check if the non-raw field exists in the table (case-insensitive comparison)
+        matching_fields <- which(tolower(table_fields) == tolower(non_raw_field))
+        if (length(matching_fields) > 0) {
+          # Use the actual field name (with correct casing) from the table
+          non_raw_field <- table_fields[matching_fields[1]]
+          
+          # It's a match - create a mapping table
+          message(sprintf("Found mapping in '%s.%s': %s -> %s", 
+                        schema_name, table_name, raw_field, non_raw_field))
+          
+          # Construct fully qualified table name with schema
+          qualified_table_name <- if (schema_name == "main" && grepl("SQLite", db_type)) {
+            # SQLite doesn't need schema qualification for main schema
+            dbQuoteIdentifier(db_conn, table_name)
+          } else {
+            # Other databases need schema qualification
+            paste0(
+              dbQuoteIdentifier(db_conn, schema_name), 
+              ".", 
+              dbQuoteIdentifier(db_conn, table_name)
+            )
+          }
+          
+          # Quote column names for SQL safety
+          quoted_raw_field <- dbQuoteIdentifier(db_conn, raw_field)
+          quoted_non_raw_field <- dbQuoteIdentifier(db_conn, non_raw_field)
+          
+          # Query to get distinct values, their mappings, and count occurrences
+          query <- sprintf("SELECT %s, %s, COUNT(*) as row_count 
+                          FROM %s 
+                          GROUP BY %s, %s
+                          ORDER BY %s",
+                          quoted_raw_field, quoted_non_raw_field,
+                          qualified_table_name,
+                          quoted_raw_field, quoted_non_raw_field,
+                          quoted_raw_field)
+          
+          # Safely execute query and get the mapping data
+          tryCatch({
+            mapping_data <- dbGetQuery(db_conn, query)
+            
+            # Name the mapping table based on the schema, table and fields
+            mapping_name <- paste0(schema_name, "_", table_name, "_", non_raw_field, "_mapping")
+            
+            # Rename columns to be more descriptive
+            names(mapping_data) <- c("raw_value", "mapped_value", "row_count")
+            
+            # Add to our list of mapping tables
+            mapping_tables[[mapping_name]] <- mapping_data
+          }, error = function(e) {
+            warning(sprintf("Error querying mapping for %s.%s - %s: %s", 
+                           schema_name, table_name, raw_field, e$message))
+          })
+        }
+      }
+    }
+  }
+  
+  # Return the list of mapping tables
+  return(mapping_tables)
+}
+
+# Example usage:
+# library(DBI)
+# library(RPostgres)  # Or any other database driver
+# 
+# # Create a database connection
+# db_conn <- dbConnect(RPostgres::Postgres(),
+#                     host = "localhost",
+#                     port = 5432,
+#                     dbname = "mydb",
+#                     user = "username",
+#                     password = "password")
+# 
+# # Get mappings for all schemas
+# all_mappings <- get_field_mappings(db_conn)
+# 
+# # Get mappings only for specific schemas
+# specific_mappings <- get_field_mappings(db_conn, schemas = c("public", "sales"))
+# 
+# # Get mappings for a single schema
+# public_mappings <- get_field_mappings(db_conn, schemas = "public")
+# 
+# # View a specific mapping
+# print(mappings$schema_name_table_name_field_name_mapping)
+# 
+# # Close the connection when done
+# dbDisconnect(db_conn)
+```
+
+```{r}
+con <- connection <- DBI::dbConnect(odbc::odbc(), "SQLODBCD17CDM", encoding="UTF-8", Database = "CDW")
+
+mapped <- get_field_mappings(con, schema = "dbo")
+mapped
+```
+
+## Latest iteration
+
+```{r}
+library(DBI)
+library(odbc)
+library(visNetwork)
+library(dplyr)
+
+visualize_db_schema <- function(con, 
+                               infer_relationships = TRUE,
+                               name_matching_threshold = 0.8) {
+  
+  # Get table and column information
+  columns_df <- dbGetQuery(con, "
+    SELECT 
+      TABLE_NAME,
+      COLUMN_NAME,
+      DATA_TYPE,
+      CHARACTER_MAXIMUM_LENGTH,
+      NUMERIC_PRECISION
+    FROM INFORMATION_SCHEMA.COLUMNS
+  ")
+  
+  # Get table row counts
+  tables_df <- dbGetQuery(con, "
+    SELECT 
+      t.name AS table_name,
+      SUM(p.rows) AS row_count
+    FROM sys.tables t
+    INNER JOIN sys.partitions p ON t.object_id = p.object_id
+    WHERE p.index_id IN (0,1)
+    GROUP BY t.name
+  ")
+  
+  # Get explicit foreign key relationships
+  relationships_df <- get_explicit_relationships(con)
+  
+  # Infer relationships if requested
+  if (infer_relationships && nrow(columns_df) > 0) {
+    inferred_rels <- infer_table_relationships(columns_df, name_matching_threshold)
+    
+    if (nrow(inferred_rels) > 0) {
+      # Standardize column names and add metadata
+      inferred_rels <- inferred_rels %>%
+        mutate(
+          constraint_name = paste0("INFERRED_", row_number()),
+          row_count = 0,
+          is_inferred = TRUE
+        ) %>%
+        select(pk_table, fk_table, fk_column = inferred_fk_column, 
+               constraint_name, row_count, is_inferred)
+    }
+    
+    # Mark explicit relationships
+    if (nrow(relationships_df) > 0) {
+      relationships_df$is_inferred <- FALSE
+    }
+    
+    # Combine relationships
+    relationships_df <- bind_rows(relationships_df, inferred_rels)
+  }
+  
+  # Create visualization
+  create_network_visualization(tables_df, columns_df, relationships_df)
+}
+
+get_explicit_relationships <- function(con) {
+  tryCatch({
+    base_rels <- dbGetQuery(con, "
+      SELECT 
+        pk_table = pk.TABLE_NAME,
+        fk_table = fk.TABLE_NAME,
+        fk_column = kcu.COLUMN_NAME,
+        constraint_name = rc.CONSTRAINT_NAME
+      FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc
+      JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS fk 
+        ON rc.CONSTRAINT_NAME = fk.CONSTRAINT_NAME
+      JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS pk 
+        ON rc.UNIQUE_CONSTRAINT_NAME = pk.CONSTRAINT_NAME
+      JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu 
+        ON rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+    ")
+    
+    if (nrow(base_rels) == 0) {
+      return(data.frame(
+        pk_table = character(),
+        fk_table = character(),
+        fk_column = character(),
+        constraint_name = character(),
+        row_count = numeric(),
+        stringsAsFactors = FALSE
+      ))
+    }
+    
+    # Get distinct counts for each foreign key
+    base_rels$row_count <- sapply(1:nrow(base_rels), function(i) {
+      tryCatch({
+        query <- sprintf(
+          "SELECT COUNT(DISTINCT [%s]) as count FROM [%s]",
+          base_rels$fk_column[i],
+          base_rels$fk_table[i]
+        )
+        result <- dbGetQuery(con, query)
+        if (nrow(result) > 0 && !is.na(result$count[1])) result$count[1] else 0
+      }, error = function(e) 0)
+    })
+    
+    base_rels
+  }, error = function(e) {
+    # Return empty dataframe on error
+    data.frame(
+      pk_table = character(),
+      fk_table = character(),
+      fk_column = character(),
+      constraint_name = character(),
+      row_count = numeric(),
+      stringsAsFactors = FALSE
+    )
+  })
+}
+
+infer_table_relationships <- function(columns_df, threshold = 0.8) {
+  tables <- unique(columns_df$TABLE_NAME)
+  
+  # Pre-compute column info for efficiency
+  col_info <- columns_df %>%
+    select(TABLE_NAME, COLUMN_NAME, DATA_TYPE) %>%
+    group_by(TABLE_NAME) %>%
+    summarise(columns = list(COLUMN_NAME), 
+              types = list(DATA_TYPE), 
+              .groups = 'drop')
+  
+  potential_rels <- list()
+  
+  for (i in 1:length(tables)) {
+    table1 <- tables[i]
+    table1_info <- col_info[col_info$TABLE_NAME == table1, ]
+    
+    for (j in 1:length(tables)) {
+      if (i == j) next
+      
+      table2 <- tables[j]
+      table2_info <- col_info[col_info$TABLE_NAME == table2, ]
+      
+      # Look for potential foreign key patterns
+      fk_patterns <- c(
+        paste0(gsub("s$", "", table1), "Id"),  # Singular + Id
+        paste0(table1, "Id"),                   # Table name + Id
+        paste0(gsub("s$", "", table1), "_id"), # Singular + _id
+        paste0(table1, "_id")                   # Table name + _id
+      )
+      
+      # Check each column in table2 against patterns
+      for (k in seq_along(table2_info$columns[[1]])) {
+        col2 <- table2_info$columns[[1]][k]
+        type2 <- table2_info$types[[1]][k]
+        
+        # Check if column matches any FK pattern
+        for (pattern in fk_patterns) {
+          if (agrepl(pattern, col2, max.distance = 1 - threshold, ignore.case = TRUE)) {
+            # Find matching PK column (usually 'Id' or table-specific ID)
+            pk_candidates <- c("Id", "ID", paste0(table1, "Id"), paste0(table1, "_id"))
+            
+            for (pk_col in pk_candidates) {
+              if (pk_col %in% table1_info$columns[[1]]) {
+                pk_idx <- which(table1_info$columns[[1]] == pk_col)
+                type1 <- table1_info$types[[1]][pk_idx]
+                
+                # Check if data types match
+                if (type1 == type2) {
+                  potential_rels[[length(potential_rels) + 1]] <- data.frame(
+                    pk_table = table1,
+                    fk_table = table2,
+                    inferred_pk_column = pk_col,
+                    inferred_fk_column = col2,
+                    stringsAsFactors = FALSE
+                  )
+                  break
+                }
+              }
+            }
+            break
+          }
+        }
+      }
+    }
+  }
+  
+  if (length(potential_rels) > 0) {
+    bind_rows(potential_rels) %>% distinct()
+  } else {
+    data.frame(
+      pk_table = character(),
+      fk_table = character(),
+      inferred_pk_column = character(),
+      inferred_fk_column = character(),
+      stringsAsFactors = FALSE
+    )
+  }
+}
+
+create_network_visualization <- function(tables_df, columns_df, relationships_df) {
+  # Calculate column counts
+  column_counts <- columns_df %>%
+    group_by(TABLE_NAME) %>%
+    summarise(n_columns = n(), .groups = 'drop')
+  
+  # Create nodes
+  nodes <- tables_df %>%
+    left_join(column_counts, by = c("table_name" = "TABLE_NAME")) %>%
+    mutate(
+      id = table_name,
+      label = table_name,
+      title = paste0(
+        "Table: ", table_name,
+        "<br>Rows: ", format(row_count, big.mark = ","),
+        "<br>Columns: ", coalesce(n_columns, 0)
+      ),
+      value = log(row_count + 1) * 5,
+      group = "table"
+    ) %>%
+    select(id, label, title, value, group)
+  
+  # Create edges
+  edges <- data.frame(
+    from = character(),
+    to = character(),
+    arrows = character(),
+    title = character(),
+    stringsAsFactors = FALSE
+  )
+  
+  if (nrow(relationships_df) > 0) {
+    edges <- relationships_df %>%
+      mutate(
+        from = pk_table,
+        to = fk_table,
+        arrows = "to",
+        title = ifelse(
+          is_inferred,
+          paste0(
+            "INFERRED RELATIONSHIP",
+            "<br>Foreign Key Column: ", fk_column
+          ),
+          paste0(
+            "Foreign Key: ", constraint_name,
+            "<br>Column: ", fk_column,
+            "<br>Distinct Values: ", format(row_count, big.mark = ",")
+          )
+        )
+      ) %>%
+      select(from, to, arrows, title)
+  }
+  
+  # Create network visualization
+  visNetwork(nodes, edges) %>%
+    visOptions(
+      highlightNearest = list(enabled = TRUE, degree = 1, hover = TRUE),
+      nodesIdSelection = TRUE
+    ) %>%
+    visPhysics(
+      solver = "forceAtlas2Based",
+      forceAtlas2Based = list(
+        gravitationalConstant = -50,
+        centralGravity = 0.01,
+        springLength = 200,
+        springConstant = 0.08
+      ),
+      stabilization = list(iterations = 100)
+    ) %>%
+    visGroups(
+      groupname = "table", 
+      color = list(
+        background = "#97C2FC",
+        border = "#2B7CE9",
+        highlight = list(
+          background = "#D2E5FF", 
+          border = "#2B7CE9"
+        )
+      )
+    ) %>%
+    visLayout(randomSeed = 42)  # For consistent layout
+}
+
+# Helper function to create connection and visualize
+visualize_database <- function(server, database, uid, pwd, ...) {
+  con <- dbConnect(
+    odbc(),
+    Driver = "SQL Server",
+    Server = server,
+    Database = database,
+    UID = uid,
+    PWD = pwd
+  )
+  
+  on.exit(dbDisconnect(con))
+  
+  visualize_db_schema(con, ...)
+}
+
+# Usage examples:
+# # Option 1: With existing connection
+# con <- dbConnect(odbc(), ...)
+# network <- visualize_db_schema(con, infer_relationships = TRUE)
+# dbDisconnect(con)
+#
+# # Option 2: With helper function
+# network <- visualize_database(
+#   server = "your_server",
+#   database = "your_database",
+#   uid = "your_username",
+#   pwd = "your_password",
+#   infer_relationships = TRUE,
+#   name_matching_threshold = 0.8
+# )
+```
+
+# This version works:
+
+```{r}
+library(DBI)
+library(odbc)
+library(igraph)
+library(visNetwork)
+library(dplyr)
+
+visualize_db_schema <- function(con, 
+                               infer_relationships = TRUE,
+                               name_matching_threshold = 0.8) {
+  # Get table and column information
+  columns_query <- "
+    SELECT 
+      TABLE_NAME,
+      COLUMN_NAME,
+      DATA_TYPE,
+      CHARACTER_MAXIMUM_LENGTH,
+      NUMERIC_PRECISION
+    FROM INFORMATION_SCHEMA.COLUMNS
+  "
+  columns_df <- dbGetQuery(con, columns_query)
+  
+  # Get table row counts
+  tables_query <- "
+    SELECT 
+      t.name AS table_name,
+      p.rows AS row_count
+    FROM sys.tables t
+    INNER JOIN sys.partitions p ON t.object_id = p.object_id
+    WHERE p.index_id IN (0,1)
+  "
+  tables_df <- dbGetQuery(con, tables_query)
+  
+  # First get the relationships without counts
+  base_relationships_query <- "
+    SELECT 
+      pk_table = pk.TABLE_NAME,
+      fk_table = fk.TABLE_NAME,
+      fk_column = kcu.COLUMN_NAME,
+      constraint_name = rc.CONSTRAINT_NAME
+    FROM 
+      INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc
+      JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS fk ON rc.CONSTRAINT_NAME = fk.CONSTRAINT_NAME
+      JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS pk ON rc.UNIQUE_CONSTRAINT_NAME = pk.CONSTRAINT_NAME
+      JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu ON rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+  "
+  
+  relationships_df <- tryCatch({
+    base_rels <- dbGetQuery(con, base_relationships_query)
+    
+    # For each relationship, get the distinct count
+    if (nrow(base_rels) > 0) {
+      counts <- lapply(1:nrow(base_rels), function(i) {
+        count_query <- sprintf(
+          "SELECT COUNT(DISTINCT [%s]) as count FROM [%s]",
+          base_rels$fk_column[i],
+          base_rels$fk_table[i]
+        )
+        tryCatch({
+          count <- dbGetQuery(con, count_query)$count
+          if (length(count) == 0) 0 else count
+        }, error = function(e) 0)
+      })
+      
+      base_rels$row_count <- unlist(counts)
+      base_rels
+    } else {
+      data.frame(
+        pk_table = character(),
+        fk_table = character(),
+        fk_column = character(),
+        constraint_name = character(),
+        row_count = numeric()
+      )
+    }
+  }, error = function(e) {
+    data.frame(
+      pk_table = character(),
+      fk_table = character(),
+      fk_column = character(),
+      constraint_name = character(),
+      row_count = numeric()
+    )
+  })
+  
+  # Infer relationships if requested
+  if (infer_relationships) {
+    inferred_relationships <- infer_table_relationships(
+      columns_df, 
+      name_matching_threshold
+    )
+    
+    # Combine explicit and inferred relationships
+    if (nrow(inferred_relationships) > 0) {
+      # Add columns to match the explicit relationships structure
+      inferred_relationships$fk_column <- inferred_relationships$inferred_fk_column
+      inferred_relationships$constraint_name <- paste0("INFERRED_", 1:nrow(inferred_relationships))
+      inferred_relationships$row_count <- 0
+      inferred_relationships$is_inferred <- TRUE
+    }
+    
+    # Add is_inferred column to existing relationships
+    if (nrow(relationships_df) > 0) {
+      relationships_df$is_inferred <- FALSE
+    }
+    
+    # Combine the datasets
+    relationships_df <- rbind(
+      relationships_df,
+      inferred_relationships[, names(relationships_df)]
+    )
+  }
+  
+  # Calculate column counts per table
+  column_counts <- sapply(tables_df$table_name, function(tname) {
+    sum(columns_df$TABLE_NAME == tname)
+  })
+
+  # Create nodes dataframe
+  nodes <- data.frame(
+    id = tables_df$table_name,
+    label = tables_df$table_name,
+    title = paste("Table:", tables_df$table_name, 
+                 "<br>Rows:", format(tables_df$row_count, big.mark=","),
+                 "<br>Columns:", column_counts[tables_df$table_name]),
+    value = log(tables_df$row_count + 1) * 5,
+    group = "table"
+  )
+  
+  # Create edges dataframe with detailed tooltips
+  if (nrow(relationships_df) > 0) {
+    edges <- data.frame(
+      from = relationships_df$pk_table,
+      to = relationships_df$fk_table,
+      arrows = "to",
+      title = character(nrow(relationships_df))  # Initialize with empty strings
+    )
+    
+    # Create tooltips based on whether the relationship is inferred or not
+    for (i in 1:nrow(relationships_df)) {
+      if (isTRUE(relationships_df$is_inferred[i])) {
+        edges$title[i] <- sprintf(
+          "INFERRED RELATIONSHIP\nPrimary Key Table: %s\nForeign Key Table: %s\nForeign Key Column: %s",
+          relationships_df$pk_table[i],
+          relationships_df$fk_table[i],
+          relationships_df$fk_column[i]
+        )
+      } else {
+        edges$title[i] <- sprintf(
+          "Foreign Key: %s\nColumn: %s\nDistinct Values: %s",
+          relationships_df$constraint_name[i],
+          relationships_df$fk_column[i],
+          format(relationships_df$row_count[i], big.mark = ",")
+        )
+      }
+    }
+  } else {
+    edges <- data.frame(
+      from = character(),
+      to = character(),
+      arrows = character(),
+      title = character()
+    )
+  }
+  
+  # Create and customize the network visualization
+  network <- visNetwork(nodes, edges) %>%
+    visOptions(
+      highlightNearest = TRUE,
+      nodesIdSelection = TRUE
+    ) %>%
+    visPhysics(
+      solver = "forceAtlas2Based",
+      forceAtlas2Based = list(
+        gravitationalConstant = -50,
+        centralGravity = 0.01,
+        springLength = 200,
+        springConstant = 0.08
+      )
+    ) %>%
+    visGroups(groupname = "table", color = list(
+      background = "#97C2FC",
+      border = "#2B7CE9",
+      highlight = list(background = "#D2E5FF", border = "#2B7CE9")
+    ))
+  
+  return(network)
+}
+
+infer_table_relationships <- function(columns_df, name_matching_threshold = 0.8) {
+  potential_relationships <- data.frame(
+    pk_table = character(),
+    fk_table = character(),
+    inferred_pk_column = character(),
+    inferred_fk_column = character(),
+    stringsAsFactors = FALSE
+  )
+  
+  # Get unique tables
+  tables <- unique(columns_df$TABLE_NAME)
+  
+  for (table1 in tables) {
+    for (table2 in tables) {
+      if (table1 != table2) {
+        # Get columns for both tables
+        cols1 <- columns_df[columns_df$TABLE_NAME == table1, ]
+        cols2 <- columns_df[columns_df$TABLE_NAME == table2, ]
+        
+        # Look for potential relationships based on naming patterns
+        for (col1 in cols1$COLUMN_NAME) {
+          for (col2 in cols2$COLUMN_NAME) {
+            # Check if columns have matching data types
+            type1 <- columns_df$DATA_TYPE[columns_df$TABLE_NAME == table1 & 
+                                        columns_df$COLUMN_NAME == col1][1]
+            type2 <- columns_df$DATA_TYPE[columns_df$TABLE_NAME == table2 & 
+                                        columns_df$COLUMN_NAME == col2][1]
+            
+            # Only proceed if we have valid types to compare
+            if (!is.na(type1) && !is.na(type2) && type1 == type2) {
+              # Check common foreign key patterns
+              patterns <- c(
+                # Check if table1 name (singular) + "Id" exists in table2
+                paste0(gsub("s$", "", table1), "Id"),
+                # Check if table1 name + "Id" exists in table2
+                paste0(table1, "Id"),
+                # Check for exact column name match
+                col1
+              )
+              
+              # Check if any pattern matches
+              pattern_matches <- sapply(patterns, function(p) {
+                agrepl(p, col2, max.distance = 1 - name_matching_threshold)
+              })
+              
+              if (any(pattern_matches)) {
+                potential_relationships <- rbind(
+                  potential_relationships,
+                  data.frame(
+                    pk_table = table1,
+                    fk_table = table2,
+                    inferred_pk_column = col1,
+                    inferred_fk_column = col2,
+                    stringsAsFactors = FALSE
+                  )
+                )
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  return(unique(potential_relationships))
+}
+
+# Usage example:
+# # First create your connection
+# con <- DBI::dbConnect(odbc::odbc(),
+#                      Driver = "SQL Server",
+#                      Server = "your_server",
+#                      Database = "your_database",
+#                      UID = "your_username",
+#                      PWD = "your_password")
+#
+# # Then pass it to the visualization function
+# network <- visualize_db_schema(
+#   con = con,
+#   infer_relationships = TRUE,
+#   name_matching_threshold = 0.8
+# )
+#
+# # Don't forget to close the connection when you're done
+# dbDisconnect(con)
+```
+
+```{r}
+
+library(DBI)
+library(odbc)
+library(visNetwork)
+library(dplyr)
+
+visualize_db_schema <- function(con, 
+                               infer_relationships = TRUE,
+                               name_matching_threshold = 0.8) {
+  
+  # Get table and column information
+  columns_df <- dbGetQuery(con, "
+    SELECT 
+      TABLE_NAME,
+      COLUMN_NAME,
+      DATA_TYPE,
+      CHARACTER_MAXIMUM_LENGTH,
+      NUMERIC_PRECISION
+    FROM INFORMATION_SCHEMA.COLUMNS
+  ")
+  
+  # Get table row counts
+  tables_df <- dbGetQuery(con, "
+    SELECT 
+      t.name AS table_name,
+      SUM(p.rows) AS row_count
+    FROM sys.tables t
+    INNER JOIN sys.partitions p ON t.object_id = p.object_id
+    WHERE p.index_id IN (0,1)
+    GROUP BY t.name
+  ")
+  
+  # Get explicit foreign key relationships
+  relationships_df <- get_explicit_relationships(con)
+  
+  # Ensure is_inferred column exists for explicit relationships
+  if (nrow(relationships_df) > 0) {
+    relationships_df$is_inferred <- FALSE
+  } else {
+    # Create empty dataframe with all required columns
+    relationships_df <- data.frame(
+      pk_table = character(),
+      fk_table = character(),
+      fk_column = character(),
+      constraint_name = character(),
+      row_count = numeric(),
+      is_inferred = logical(),
+      stringsAsFactors = FALSE
+    )
+  }
+  
+  # Infer relationships if requested
+  if (infer_relationships && nrow(columns_df) > 0) {
+    inferred_rels <- infer_table_relationships(columns_df, name_matching_threshold)
+    
+    if (nrow(inferred_rels) > 0) {
+      # Standardize column names and add metadata
+      inferred_rels <- inferred_rels %>%
+        mutate(
+          constraint_name = paste0("INFERRED_", row_number()),
+          row_count = 0,
+          is_inferred = TRUE
+        ) %>%
+        select(pk_table, fk_table, fk_column = inferred_fk_column, 
+               constraint_name, row_count, is_inferred)
+      
+      # Combine relationships
+      relationships_df <- bind_rows(relationships_df, inferred_rels)
+    }
+  }
+  
+  # Create visualization
+  create_network_visualization(tables_df, columns_df, relationships_df)
+}
+
+get_explicit_relationships <- function(con) {
+  tryCatch({
+    base_rels <- dbGetQuery(con, "
+      SELECT 
+        pk_table = pk.TABLE_NAME,
+        fk_table = fk.TABLE_NAME,
+        fk_column = kcu.COLUMN_NAME,
+        constraint_name = rc.CONSTRAINT_NAME
+      FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc
+      JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS fk 
+        ON rc.CONSTRAINT_NAME = fk.CONSTRAINT_NAME
+      JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS pk 
+        ON rc.UNIQUE_CONSTRAINT_NAME = pk.CONSTRAINT_NAME
+      JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu 
+        ON rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+    ")
+    
+    if (nrow(base_rels) == 0) {
+      return(data.frame(
+        pk_table = character(),
+        fk_table = character(),
+        fk_column = character(),
+        constraint_name = character(),
+        row_count = numeric(),
+        stringsAsFactors = FALSE
+      ))
+    }
+    
+    # Get distinct counts for each foreign key
+    base_rels$row_count <- sapply(1:nrow(base_rels), function(i) {
+      tryCatch({
+        query <- sprintf(
+          "SELECT COUNT(DISTINCT [%s]) as count FROM [%s]",
+          base_rels$fk_column[i],
+          base_rels$fk_table[i]
+        )
+        result <- dbGetQuery(con, query)
+        if (nrow(result) > 0 && !is.na(result$count[1])) result$count[1] else 0
+      }, error = function(e) 0)
+    })
+    
+    base_rels
+  }, error = function(e) {
+    # Return empty dataframe on error
+    data.frame(
+      pk_table = character(),
+      fk_table = character(),
+      fk_column = character(),
+      constraint_name = character(),
+      row_count = numeric(),
+      stringsAsFactors = FALSE
+    )
+  })
+}
+
+infer_table_relationships <- function(columns_df, threshold = 0.8) {
+  tables <- unique(columns_df$TABLE_NAME)
+  
+  # Pre-compute column info for efficiency
+  col_info <- columns_df %>%
+    select(TABLE_NAME, COLUMN_NAME, DATA_TYPE) %>%
+    group_by(TABLE_NAME) %>%
+    summarise(columns = list(COLUMN_NAME), 
+              types = list(DATA_TYPE), 
+              .groups = 'drop')
+  
+  potential_rels <- list()
+  
+  # Method 1: Forward matching (table name -> FK in other tables)
+  for (i in 1:length(tables)) {
+    table1 <- tables[i]
+    table1_info <- col_info[col_info$TABLE_NAME == table1, ]
+    
+    for (j in 1:length(tables)) {
+      if (i == j) next
+      
+      table2 <- tables[j]
+      table2_info <- col_info[col_info$TABLE_NAME == table2, ]
+      
+      # Generate patterns based on table1 name
+      standard_patterns <- get_standard_fk_patterns(table1)
+      fuzzy_patterns <- get_fuzzy_matching_patterns(table1)
+      
+      # Check each column in table2 against patterns
+      for (k in seq_along(table2_info$columns[[1]])) {
+        col2 <- table2_info$columns[[1]][k]
+        type2 <- table2_info$types[[1]][k]
+        
+        # First try standard patterns
+        matched_pk <- check_standard_patterns(col2, standard_patterns, table1_info, type2, threshold)
+        
+        # If no standard match found, try fuzzy matching
+        if (is.null(matched_pk)) {
+          matched_pk <- check_fuzzy_patterns(col2, fuzzy_patterns, table1_info, type2, threshold)
+        }
+        
+        # If we found a match, add it to potential relationships
+        if (!is.null(matched_pk)) {
+          potential_rels[[length(potential_rels) + 1]] <- data.frame(
+            pk_table = table1,
+            fk_table = table2,
+            inferred_pk_column = matched_pk,
+            inferred_fk_column = col2,
+            match_confidence = attr(matched_pk, "confidence"),
+            match_type = "forward",
+            stringsAsFactors = FALSE
+          )
+        }
+      }
+    }
+  }
+  
+  # Method 2: Reverse matching (FK column -> find matching PK in other tables)
+  for (i in 1:length(tables)) {
+    table1 <- tables[i]  # This will be the FK table
+    table1_info <- col_info[col_info$TABLE_NAME == table1, ]
+    
+    # Look for potential FK columns in table1
+    for (k in seq_along(table1_info$columns[[1]])) {
+      col1 <- table1_info$columns[[1]][k]
+      type1 <- table1_info$types[[1]][k]
+      
+      # Check if this column looks like a foreign key
+      if (is_potential_fk_column(col1)) {
+        # Extract the base name from the FK column
+        base_names <- extract_base_names_from_fk(col1)
+        
+        # Look for matching tables and PK columns
+        for (j in 1:length(tables)) {
+          if (i == j) next
+          
+          table2 <- tables[j]  # This will be the potential PK table
+          table2_info <- col_info[col_info$TABLE_NAME == table2, ]
+          
+          # Check if table2 name matches any base name or has matching PK column
+          match_result <- find_matching_pk_table(base_names, table2, table2_info, type1, threshold)
+          
+          if (!is.null(match_result)) {
+            potential_rels[[length(potential_rels) + 1]] <- data.frame(
+              pk_table = table2,
+              fk_table = table1,
+              inferred_pk_column = match_result$pk_column,
+              inferred_fk_column = col1,
+              match_confidence = match_result$confidence,
+              match_type = "reverse",
+              stringsAsFactors = FALSE
+            )
+          }
+        }
+      }
+    }
+  }
+  
+  if (length(potential_rels) > 0) {
+    result <- bind_rows(potential_rels) %>% 
+      distinct(pk_table, fk_table, inferred_pk_column, inferred_fk_column, .keep_all = TRUE) %>%
+      arrange(desc(match_confidence))  # Sort by confidence
+    
+    # Remove helper columns for compatibility
+    result$match_confidence <- NULL
+    result$match_type <- NULL
+    return(result)
+  } else {
+    return(data.frame(
+      pk_table = character(),
+      fk_table = character(),
+      inferred_pk_column = character(),
+      inferred_fk_column = character(),
+      stringsAsFactors = FALSE
+    ))
+  }
+}
+
+# Helper function to check if a column looks like a foreign key
+is_potential_fk_column <- function(col_name) {
+  col_lower <- tolower(col_name)
+  
+  # Common FK patterns
+  fk_indicators <- c("_id$", "id$", "_key$", "key$", "_ref$", "ref$", "_no$", "no$", "_num$", "num$")
+  
+  return(any(sapply(fk_indicators, function(pattern) grepl(pattern, col_lower))))
+}
+
+# Helper function to extract base names from FK column names
+extract_base_names_from_fk <- function(fk_column) {
+  col_lower <- tolower(fk_column)
+  
+  # Remove common FK suffixes to get base names
+  base_names <- c()
+  
+  # Pattern matching to extract base name
+  suffixes <- c("_id$", "id$", "_key$", "key$", "_ref$", "ref$", "_no$", "no$", "_num$", "num$")
+  
+  for (suffix in suffixes) {
+    if (grepl(suffix, col_lower)) {
+      base_name <- gsub(suffix, "", col_lower)
+      if (nchar(base_name) > 0) {
+        base_names <- c(base_names, base_name)
+      }
+    }
+  }
+  
+  # Also add variations
+  if (length(base_names) > 0) {
+    additional_names <- c()
+    for (base in base_names) {
+      # Add plural form
+      additional_names <- c(additional_names, paste0(base, "s"))
+      # Add singular form (remove 's' if present)
+      if (grepl("s$", base) && nchar(base) > 1) {
+        additional_names <- c(additional_names, gsub("s$", "", base))
+      }
+      # Add variations with different cases
+      additional_names <- c(additional_names, 
+                           toupper(base), 
+                           paste0(toupper(substr(base, 1, 1)), substr(base, 2, nchar(base))))
+    }
+    base_names <- c(base_names, additional_names)
+  }
+  
+  return(unique(base_names))
+}
+
+# Helper function to find matching PK table
+find_matching_pk_table <- function(base_names, table_name, table_info, fk_type, threshold) {
+  table_lower <- tolower(table_name)
+  
+  # Check if table name matches any base name
+  best_match <- NULL
+  best_score <- 0
+  best_pk_col <- NULL
+  
+  for (base_name in base_names) {
+    # Direct table name matching
+    if (table_lower == base_name) {
+      # Look for PK columns in this table
+      pk_col <- find_pk_column_in_table(table_info, fk_type)
+      if (!is.null(pk_col)) {
+        return(list(pk_column = pk_col, confidence = 0.95))
+      }
+    }
+    
+    # Fuzzy table name matching
+    similarity <- calculate_levenshtein_similarity(table_lower, base_name)
+    if (similarity >= threshold && similarity > best_score) {
+      pk_col <- find_pk_column_in_table(table_info, fk_type)
+      if (!is.null(pk_col)) {
+        best_score <- similarity
+        best_pk_col <- pk_col
+        best_match <- base_name
+      }
+    }
+    
+    # Also check if any column in the table matches the base name pattern
+    for (col_idx in seq_along(table_info$columns[[1]])) {
+      col_name <- table_info$columns[[1]][col_idx]
+      col_type <- table_info$types[[1]][col_idx]
+      
+      if (col_type == fk_type) {
+        col_lower <- tolower(col_name)
+        
+        # Check if this column could be a PK that matches our FK base name
+        pk_patterns <- c(
+          paste0(base_name, "id"), paste0(base_name, "_id"),
+          paste0(base_name, "key"), paste0(base_name, "_key"),
+          "id", "key", base_name
+        )
+        
+        for (pattern in pk_patterns) {
+          similarity <- calculate_levenshtein_similarity(col_lower, pattern)
+          if (similarity >= threshold && similarity > best_score) {
+            best_score <- similarity
+            best_pk_col <- col_name
+            best_match <- pattern
+          }
+        }
+      }
+    }
+  }
+  
+  if (!is.null(best_pk_col)) {
+    confidence <- min(0.9, best_score * 0.95)
+    return(list(pk_column = best_pk_col, confidence = confidence))
+  }
+  
+  return(NULL)
+}
+
+# Helper function to find PK column in a table
+find_pk_column_in_table <- function(table_info, required_type) {
+  # Common PK column names
+  pk_candidates <- c("Id", "ID", "id", "Key", "KEY", "key")
+  
+  # First, look for exact matches
+  for (pk_name in pk_candidates) {
+    if (pk_name %in% table_info$columns[[1]]) {
+      pk_idx <- which(table_info$columns[[1]] == pk_name)
+      if (length(pk_idx) > 0 && table_info$types[[1]][pk_idx] == required_type) {
+        return(pk_name)
+      }
+    }
+  }
+  
+  # Then look for table-specific PK patterns
+  table_name <- table_info$TABLE_NAME[1]
+  table_specific_pks <- c(
+    paste0(table_name, "Id"), paste0(table_name, "_id"),
+    paste0(table_name, "ID"), paste0(table_name, "_ID"),
+    paste0(gsub("s$", "", table_name), "Id"), paste0(gsub("s$", "", table_name), "_id")
+  )
+  
+  for (pk_name in table_specific_pks) {
+    if (pk_name %in% table_info$columns[[1]]) {
+      pk_idx <- which(table_info$columns[[1]] == pk_name)
+      if (length(pk_idx) > 0 && table_info$types[[1]][pk_idx] == required_type) {
+        return(pk_name)
+      }
+    }
+  }
+  
+  return(NULL)
+}
+
+# Helper function to generate standard FK patterns
+get_standard_fk_patterns <- function(table_name) {
+  c(
+    paste0(gsub("s$", "", table_name), "Id"),     # Singular + Id
+    paste0(table_name, "Id"),                     # Table name + Id
+    paste0(gsub("s$", "", table_name), "_id"),    # Singular + _id
+    paste0(table_name, "_id"),                    # Table name + _id
+    paste0(gsub("s$", "", table_name), "ID"),     # Singular + ID
+    paste0(table_name, "ID"),                     # Table name + ID
+    paste0(gsub("s$", "", table_name), "_ID"),    # Singular + _ID
+    paste0(table_name, "_ID")                     # Table name + _ID
+  )
+}
+
+# Helper function to generate fuzzy matching patterns
+get_fuzzy_matching_patterns <- function(table_name) {
+  # Generate various forms of the table name for fuzzy matching
+  base_forms <- c(
+    table_name,
+    gsub("s$", "", table_name),           # Remove trailing 's'
+    gsub("_", "", table_name),            # Remove underscores
+    gsub("-", "", table_name),            # Remove hyphens
+    tolower(table_name),                  # Lowercase
+    toupper(table_name),                  # Uppercase
+    gsub("([a-z])([A-Z])", "\\1_\\2", table_name) # camelCase to snake_case
+  )
+  
+  # Generate potential column name patterns
+  patterns <- c()
+  for (base in unique(base_forms)) {
+    if (nchar(base) > 0) {
+      patterns <- c(patterns,
+        base,                             # Just the table name
+        paste0(base, "Id"),              # base + Id
+        paste0(base, "_id"),             # base + _id  
+        paste0(base, "ID"),              # base + ID
+        paste0(base, "_ID"),             # base + _ID
+        paste0(base, "Key"),             # base + Key
+        paste0(base, "_key"),            # base + _key
+        paste0(base, "Ref"),             # base + Ref
+        paste0(base, "_ref"),            # base + _ref
+        paste0(base, "No"),              # base + No
+        paste0(base, "_no"),             # base + _no
+        paste0(base, "Num"),             # base + Num
+        paste0(base, "_num"),            # base + _num
+        paste0("ref_", base),            # ref_ + base
+        paste0("fk_", base)              # fk_ + base
+      )
+    }
+  }
+  
+  return(unique(patterns[nchar(patterns) > 0]))
+}
+
+# Helper function to check standard patterns
+check_standard_patterns <- function(col_name, patterns, table_info, col_type, threshold) {
+  for (pattern in patterns) {
+    if (agrepl(pattern, col_name, max.distance = 1 - threshold, ignore.case = TRUE)) {
+      # Find matching PK column
+      pk_candidates <- c("Id", "ID", "id", paste0(table_info$TABLE_NAME[1], "Id"), 
+                        paste0(table_info$TABLE_NAME[1], "_id"),
+                        paste0(table_info$TABLE_NAME[1], "ID"),
+                        paste0(table_info$TABLE_NAME[1], "_ID"))
+      
+      for (pk_col in pk_candidates) {
+        if (pk_col %in% table_info$columns[[1]]) {
+          pk_idx <- which(table_info$columns[[1]] == pk_col)
+          if (length(pk_idx) > 0 && table_info$types[[1]][pk_idx] == col_type) {
+            attr(pk_col, "confidence") <- 0.9  # High confidence for standard patterns
+            return(pk_col)
+          }
+        }
+      }
+    }
+  }
+  return(NULL)
+}
+
+# Helper function to check fuzzy patterns using multiple similarity measures
+check_fuzzy_patterns <- function(col_name, patterns, table_info, col_type, threshold) {
+  best_match <- NULL
+  best_score <- 0
+  best_pk <- NULL
+  
+  # Check against all patterns
+  for (pattern in patterns) {
+    # Calculate multiple similarity scores
+    scores <- c(
+      # Jaro-Winkler similarity (good for typos and variations)
+      if (requireNamespace("RecordLinkage", quietly = TRUE)) {
+        RecordLinkage::jarowinkler(tolower(col_name), tolower(pattern))
+      } else { 0 },
+      
+      # Levenshtein-based similarity (compatible with all R versions)
+      calculate_levenshtein_similarity(tolower(col_name), tolower(pattern)),
+      
+      # Longest Common Subsequence similarity
+      calculate_lcs_similarity(tolower(col_name), tolower(pattern)),
+      
+      # Substring matching bonus
+      ifelse(grepl(tolower(pattern), tolower(col_name), fixed = TRUE) || 
+             grepl(tolower(col_name), tolower(pattern), fixed = TRUE), 0.2, 0)
+    )
+    
+    # Use the maximum score from all measures
+    max_score <- max(scores, na.rm = TRUE)
+    
+    if (max_score > best_score && max_score >= threshold) {
+      # Find matching PK column with same data type
+      pk_candidates <- c("Id", "ID", "id", 
+                        paste0(table_info$TABLE_NAME[1], "Id"), 
+                        paste0(table_info$TABLE_NAME[1], "_id"),
+                        paste0(gsub("s$", "", table_info$TABLE_NAME[1]), "Id"),
+                        paste0(gsub("s$", "", table_info$TABLE_NAME[1]), "_id"))
+      
+      for (pk_col in pk_candidates) {
+        if (pk_col %in% table_info$columns[[1]]) {
+          pk_idx <- which(table_info$columns[[1]] == pk_col)
+          if (length(pk_idx) > 0 && table_info$types[[1]][pk_idx] == col_type) {
+            best_score <- max_score
+            best_pk <- pk_col
+            best_match <- pattern
+            break
+          }
+        }
+      }
+    }
+  }
+  
+  if (!is.null(best_pk)) {
+    # Adjust confidence based on similarity score
+    confidence <- min(0.8, best_score * 0.9)  # Cap at 0.8 for fuzzy matches
+    attr(best_pk, "confidence") <- confidence
+    return(best_pk)
+  }
+  
+  return(NULL)
+}
+
+# Helper function to calculate Levenshtein similarity (compatible with all R versions)
+calculate_levenshtein_similarity <- function(s1, s2) {
+  if (nchar(s1) == 0 && nchar(s2) == 0) return(1)
+  if (nchar(s1) == 0 || nchar(s2) == 0) return(0)
+  
+  # Use adist without method parameter for compatibility
+  distance <- adist(s1, s2)[1]
+  max_length <- max(nchar(s1), nchar(s2))
+  
+  # Convert distance to similarity (0 to 1)
+  similarity <- 1 - (distance / max_length)
+  return(max(0, similarity))
+}
+
+# Helper function to calculate Longest Common Subsequence similarity
+calculate_lcs_similarity <- function(s1, s2) {
+  if (nchar(s1) == 0 || nchar(s2) == 0) return(0)
+  
+  # Simple LCS implementation
+  m <- nchar(s1)
+  n <- nchar(s2)
+  
+  # Create matrix
+  dp <- matrix(0, nrow = m + 1, ncol = n + 1)
+  
+  # Fill the matrix
+  for (i in 1:m) {
+    for (j in 1:n) {
+      if (substr(s1, i, i) == substr(s2, j, j)) {
+        dp[i + 1, j + 1] <- dp[i, j] + 1
+      } else {
+        dp[i + 1, j + 1] <- max(dp[i, j + 1], dp[i + 1, j])
+      }
+    }
+  }
+  
+  lcs_length <- dp[m + 1, n + 1]
+  return(lcs_length / max(m, n))
+}
+
+# Optional: Function to install required packages if not available
+ensure_required_packages <- function() {
+  if (!requireNamespace("RecordLinkage", quietly = TRUE)) {
+    message("Installing RecordLinkage package for enhanced string matching...")
+    install.packages("RecordLinkage")
+  }
+}
+
+# Optional: Function to install required packages if not available
+ensure_required_packages <- function() {
+  if (!requireNamespace("RecordLinkage", quietly = TRUE)) {
+    message("Installing RecordLinkage package for enhanced string matching...")
+    install.packages("RecordLinkage")
+  }
+}
+                     
+create_network_visualization <- function(tables_df, columns_df, relationships_df) {
+  # Calculate column counts
+  column_counts <- columns_df %>%
+    group_by(TABLE_NAME) %>%
+    summarise(n_columns = n(), .groups = 'drop')
+  
+  # Create nodes
+  nodes <- tables_df %>%
+    left_join(column_counts, by = c("table_name" = "TABLE_NAME")) %>%
+    mutate(
+      id = table_name,
+      label = table_name,
+      title = paste0(
+        "Table: ", table_name,
+        "<br>Rows: ", format(row_count, big.mark = ","),
+        "<br>Columns: ", coalesce(n_columns, 0)
+      ),
+      value = log(row_count + 1) * 5,
+      group = "table"
+    ) %>%
+    select(id, label, title, value, group)
+  
+  # Create edges - handle empty relationships_df case
+  if (nrow(relationships_df) > 0 && "is_inferred" %in% names(relationships_df)) {
+    edges <- relationships_df %>%
+      mutate(
+        from = pk_table,
+        to = fk_table,
+        arrows = "to",
+        title = ifelse(
+          is_inferred,
+          paste0(
+            "INFERRED RELATIONSHIP",
+            "<br>Foreign Key Column: ", fk_column
+          ),
+          paste0(
+            "Foreign Key: ", constraint_name,
+            "<br>Column: ", fk_column,
+            "<br>Distinct Values: ", format(row_count, big.mark = ",")
+          )
+        )
+      ) %>%
+      select(from, to, arrows, title)
+  } else {
+    # Create empty edges dataframe when no relationships exist or is_inferred column is missing
+    edges <- data.frame(
+      from = character(),
+      to = character(),
+      arrows = character(),
+      title = character(),
+      stringsAsFactors = FALSE
+    )
+  }
+  
+  # Create network visualization
+  visNetwork(nodes, edges) %>%
+    visOptions(
+      highlightNearest = list(enabled = TRUE, degree = 1, hover = TRUE),
+      nodesIdSelection = TRUE
+    ) %>%
+    visPhysics(
+      solver = "forceAtlas2Based",
+      forceAtlas2Based = list(
+        gravitationalConstant = -50,
+        centralGravity = 0.01,
+        springLength = 200,
+        springConstant = 0.08
+      ),
+      stabilization = list(iterations = 100)
+    ) %>%
+    visGroups(
+      groupname = "table", 
+      color = list(
+        background = "#97C2FC",
+        border = "#2B7CE9",
+        highlight = list(
+          background = "#D2E5FF", 
+          border = "#2B7CE9"
+        )
+      )
+    ) %>%
+    visLayout(randomSeed = 42)  # For consistent layout
+}
+
+# Helper function to create connection and visualize
+visualize_database <- function(server, database, uid, pwd, ...) {
+  con <- dbConnect(
+    odbc(),
+    Driver = "SQL Server",
+    Server = server,
+    Database = database,
+    UID = uid,
+    PWD = pwd
+  )
+  
+  on.exit(dbDisconnect(con))
+  
+  visualize_db_schema(con, ...)
+}
+
+# Usage examples:
+# # Option 1: With existing connection
+# con <- dbConnect(odbc(), ...)
+# network <- visualize_db_schema(con, infer_relationships = TRUE)
+# dbDisconnect(con)
+#
+# # Option 2: With helper function
+# network <- visualize_database(
+#   server = "your_server",
+#   database = "your_database",
+#   uid = "your_username",
+#   pwd = "your_password",
+#   infer_relationships = TRUE,
+#   name_matching_threshold = 0.8
+# )
+```
+
+Generalize network viz to work with more DBs not just SQL server
+
+```{r}
+
+```
+
+```{r}
+con <- connection <- DBI::dbConnect(odbc::odbc(), "SQLODBCD17CDM", encoding="UTF-8", Database = "CDW")
+network <- visualize_db_schema(con, infer_relationships = FALSE)
+```
+
+```{r}
+network
+```
+
+```{r}
+con <- connection <- DBI::dbConnect(odbc::odbc(), "SQLODBCD17CDM", encoding="UTF-8", Database = "MHH")
+
+network <- visualize_db_schema(con, infer_relationships = TRUE, name_matching_threshold = .8)
+network
+dbDisconnect(con)
+
+```
+
+```{r}
+# Install from GitHub
+devtools::install_github("tjohnson250/OMOPSynth")
+
+# Load the package
+library(OMOPSynth)
+```
+
+```{r}
+# Create synthetic data for 500 patients
+synthetic_db <- create_synthetic_omop_data(
+  n_patients = 500,
+  avg_visits_per_patient = 2,
+  avg_conditions_per_patient = 1.5
+)
+
+# Query the synthetic data
+person_count <- DBI::dbGetQuery(
+  synthetic_db, 
+  "SELECT COUNT(*) as count FROM person"
+)
+print(person_count)
+
+# List all tables
+tables <- DBI::dbListTables(synthetic_db)
+print(tables)
+```
+
+```{r}
+network <- visualize_db_schema(synthetic_db, infer_relationships = FALSE)
+```
