@@ -932,6 +932,7 @@ get_field_mappings <- function(db_conn) {
 # dbDisconnect(db_conn)
 ```
 
+# Prior 
 ```{r}
 get_field_mappings <- function(db_conn) {
   # Load required libraries
