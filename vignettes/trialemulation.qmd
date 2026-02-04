@@ -14,6 +14,7 @@ When you click the **Render** button a document will be generated that includes 
 
 ```{r}
 library(TrialEmulation)
+library(tidyverse)
 ```
 
 You can add options to executable code like this
@@ -45,7 +46,7 @@ print(df)
 
 ```{r}
 df_expanded <- data_preparation(df, estimand_type = "As-Treated")
-df_expanded[["data"]] |> select(id, trial_period, followup_time, treatment, outcome)
+df_expanded[["data"]] |> select(id, trial_period, followup_time, treatment, outcome) |> arrange(trial_period)
 ```
 
 ```{r}
